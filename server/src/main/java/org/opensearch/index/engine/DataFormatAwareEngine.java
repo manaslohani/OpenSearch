@@ -10,6 +10,7 @@ package org.opensearch.index.engine;
 
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.ReferenceManager;
@@ -60,6 +61,7 @@ import org.opensearch.index.engine.exec.FilesListener;
 import org.opensearch.index.engine.exec.IndexReaderProvider;
 import org.opensearch.index.engine.exec.Indexer;
 import org.opensearch.index.engine.exec.PrimaryTermFieldType;
+import org.opensearch.index.engine.exec.SearchableDirectoryReaderProvider;
 import org.opensearch.index.engine.exec.Segment;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.commit.Committer;
@@ -113,6 +115,7 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 
 import static org.opensearch.index.engine.Engine.MAX_UNSAFE_AUTO_ID_TIMESTAMP_COMMIT_ID;
 import static org.opensearch.index.seqno.SequenceNumbers.UNASSIGNED_SEQ_NO;
@@ -1751,6 +1754,98 @@ public class DataFormatAwareEngine implements Indexer {
             snapshotRef.close();
             throw e;
         }
+    }
+
+    /**
+     * Acquires a point-in-time {@link Engine.SearcherSupplier} built from this engine's Lucene-format
+     * {@link DirectoryReader}. This lets the standard {@code _search} → {@code QueryPhase} path reach
+     * composite-engine shards without {@link org.opensearch.index.shard.IndexShard} ever depending on
+     * the concrete engine type.
+     * <p>
+     * The searcher wraps only the secondary "lucene" format's reader and knows nothing of Parquet or
+     * DataFusion. Its single job is producing the matching docId set; that set becomes the backend's
+     * row filter in the aggregation phase.
+     * <p>
+     * Reference counting: the {@link GatedCloseable} returned by {@link #acquireReader()} holds the
+     * catalog snapshot and reader refs; {@code doClose()} releases them when the search context closes.
+     *
+     * @param wrapper a function applied to each acquired {@link Engine.Searcher} (e.g. reader wrapping)
+     * @param scope   the searcher scope (unused — composite engine has a single reader view)
+     * @return a searcher supplier whose {@code close()} releases the underlying reader resources
+     * @throws IllegalStateException if no Lucene-format reader is available for this composite index
+     */
+    @Override
+    public Engine.SearcherSupplier acquireSearcherSupplier(Function<Engine.Searcher, Engine.Searcher> wrapper, Engine.SearcherScope scope) {
+        ensureOpen();
+        logger.info("[AGG_DELEGATION_TRACE] DataFormatAwareEngine.acquireSearcherSupplier: acquiring reader for shard [{}]", shardId);
+        final GatedCloseable<IndexReaderProvider.Reader> readerRef;
+        try {
+            readerRef = acquireReader();
+        } catch (IOException e) {
+            throw new EngineException(shardId, "failed to acquire reader for searcher", e);
+        }
+        try {
+            // Look up the lucene format's reader from the format-aware reader map.
+            // The reader object is opaque to the server module (it's a LuceneReader record from the
+            // analytics-backend-lucene plugin). We extract the DirectoryReader via reflection on the
+            // record's directoryReader() component accessor — this is stable API (record components
+            // cannot be renamed without breaking serialization).
+            DataFormat luceneFormat = engineConfig.getDataFormatRegistry().format("lucene");
+            Object luceneReaderObj = readerRef.get().reader(luceneFormat);
+            if (luceneReaderObj == null) {
+                IOUtils.closeWhileHandlingException(readerRef);
+                throw new IllegalStateException("No Lucene reader available for composite index " + shardId);
+            }
+            final DirectoryReader directoryReader = extractDirectoryReader(luceneReaderObj);
+            logger.info(
+                "[AGG_DELEGATION_TRACE] DataFormatAwareEngine.acquireSearcherSupplier: built searcher from DirectoryReader with [{}] leaves for shard [{}]",
+                directoryReader.leaves().size(),
+                shardId
+            );
+            return new Engine.SearcherSupplier(wrapper) {
+                @Override
+                protected Engine.Searcher acquireSearcherInternal(String source) {
+                    return new Engine.Searcher(
+                        source,
+                        directoryReader,
+                        engineConfig.getSimilarity(),
+                        engineConfig.getQueryCache(),
+                        engineConfig.getQueryCachingPolicy(),
+                        () -> {}
+                    );
+                }
+
+                @Override
+                protected void doClose() {
+                    IOUtils.closeWhileHandlingException(readerRef);
+                }
+            };
+        } catch (Exception e) {
+            IOUtils.closeWhileHandlingException(readerRef);
+            if (e instanceof IllegalStateException) {
+                throw (IllegalStateException) e;
+            }
+            throw new EngineException(shardId, "failed to build searcher supplier from composite reader", e);
+        }
+    }
+
+    /**
+     * Extracts a {@link DirectoryReader} from the opaque format-specific reader object.
+     * The lucene format's reader is a record with a {@code directoryReader()} component accessor
+     * that returns a {@link DirectoryReader}. Since the server module cannot import the concrete
+     * record type (it lives in a sandbox plugin), we use reflection on the well-known accessor name.
+     */
+    private static DirectoryReader extractDirectoryReader(Object luceneReaderObj) {
+        if (luceneReaderObj instanceof DirectoryReader dr) {
+            return dr;
+        }
+        if (luceneReaderObj instanceof SearchableDirectoryReaderProvider searchable) {
+            return searchable.directoryReader();
+        }
+        throw new IllegalStateException(
+            "Lucene format reader " + luceneReaderObj.getClass().getName()
+                + " does not implement SearchableDirectoryReaderProvider; cannot build searcher"
+        );
     }
 
     @Override

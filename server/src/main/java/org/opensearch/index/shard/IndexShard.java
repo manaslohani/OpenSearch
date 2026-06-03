@@ -2405,8 +2405,15 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public Engine.SearcherSupplier acquireSearcherSupplier(Engine.SearcherScope scope) {
         readAllowed();
         markSearcherAccessed();
-        final Indexer engine = getIndexer();
-        return applyOnEngine(engine, eng -> eng.acquireSearcherSupplier(this::wrapSearcher, scope));
+        final Indexer indexer = getIndexer();
+        if (indexer instanceof EngineBackedIndexer engineBacked) {
+            // Legacy Lucene-backed engine path — unchanged.
+            return engineBacked.getEngine().acquireSearcherSupplier(this::wrapSearcher, scope);
+        }
+        // Format-aware indexer (e.g. composite engine) that exposes a searcher built from its
+        // own IndexReaderProvider.Reader. IndexShard never references the concrete engine type.
+        logger.info("[AGG_DELEGATION_TRACE] IndexShard.acquireSearcherSupplier: using format-aware Indexer path for shard [{}]", shardId);
+        return indexer.acquireSearcherSupplier(this::wrapSearcher, scope);
     }
 
     public Engine.Searcher acquireSearcher(String source) {
@@ -2424,7 +2431,31 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         readAllowed();
         markSearcherAccessed();
         final Indexer indexer = getIndexer();
-        return applyOnEngine(indexer, engine -> engine.acquireSearcher(source, scope, this::wrapSearcher));
+        if (indexer instanceof EngineBackedIndexer engineBacked) {
+            // Legacy Lucene-backed engine path — unchanged.
+            return engineBacked.getEngine().acquireSearcher(source, scope, this::wrapSearcher);
+        }
+        // Format-aware indexer (e.g. composite engine). IndexShard never references the concrete engine type.
+        logger.info(
+            "[AGG_DELEGATION_TRACE] IndexShard.acquireSearcher: using format-aware Indexer path for source=[{}] shard=[{}]",
+            source,
+            shardId
+        );
+        return indexer.acquireSearcher(source, scope, this::wrapSearcher);
+    }
+
+    /**
+     * Acquires a searcher without going through {@link #wrapSearcher}. Used by internal
+     * refresh listeners (e.g. lucene_field_count) that need the raw reader without
+     * derived-source wrapping. Branches on indexer type the same way as
+     * {@link #acquireSearcher(String, Engine.SearcherScope)}.
+     */
+    private Engine.Searcher acquireSearcherDirect(String source, Engine.SearcherScope scope) {
+        final Indexer indexer = getIndexer();
+        if (indexer instanceof EngineBackedIndexer engineBacked) {
+            return engineBacked.getEngine().acquireSearcher(source, scope);
+        }
+        return indexer.acquireSearcher(source, scope, Function.identity());
     }
 
     /**
@@ -4594,10 +4625,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                     // Use the engine directly (not IndexShard.acquireSearcher) so that we do NOT
                     // go through IndexShard.wrapSearcher.
                     try (
-                        Engine.Searcher searcher = applyOnEngine(
-                            getIndexer(),
-                            engine -> engine.acquireSearcher("lucene_field_count", Engine.SearcherScope.INTERNAL)
-                        )
+                        Engine.Searcher searcher = acquireSearcherDirect("lucene_field_count", Engine.SearcherScope.INTERNAL)
                     ) {
                         FieldInfos fieldInfos = FieldInfos.getMergedFieldInfos(searcher.getIndexReader());
                         mapperService.getLuceneFieldTracker().setFieldInfos(fieldInfos);

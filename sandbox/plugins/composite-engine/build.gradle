@@ -13,6 +13,13 @@ opensearchplugin {
 
 apply plugin: 'opensearch.internal-cluster-test'
 
+// Main compilation needs JDK 25 to consume parquet-data-format (which targets JDK 25)
+// for the segment-level Parquet DocValues routing format.
+tasks.named('compileJava').configure {
+  sourceCompatibility = JavaVersion.toVersion(25)
+  targetCompatibility = JavaVersion.toVersion(25)
+}
+
 // Test compilation needs JDK 25 to consume parquet-data-format (which targets JDK 25)
 tasks.named('compileTestJava').configure {
   sourceCompatibility = JavaVersion.toVersion(25)
@@ -44,6 +51,8 @@ internalClusterTest {
 dependencies {
   api project(':libs:opensearch-concurrent-queue')
   compileOnly project(':server')
+  // Parquet DocValues codec (ParquetDocValuesFormat) for per-field routing at the segment level.
+  compileOnly project(':sandbox:plugins:parquet-data-format')
   testImplementation project(':test:framework')
   testImplementation project(':sandbox:plugins:parquet-data-format')
   testImplementation project(':sandbox:plugins:analytics-backend-lucene')

@@ -19,6 +19,11 @@ dependencies {
   compileOnly project(':plugins:arrow-base')
   testImplementation project(':plugins:arrow-base')
 
+  // server provides Lucene (codecs, DocValues), MapperService/MappedFieldType, and the
+  // data-format framework SPI used by the DocValues codec (org.opensearch.parquet.codec).
+  compileOnly project(':server')
+  testImplementation project(':server')
+
   // Shared native bridge lib (provides the unified .so and FFM SymbolLookup)
   implementation project(':sandbox:libs:dataformat-native')
 

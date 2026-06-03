@@ -12,6 +12,7 @@ import org.opensearch.action.ActionRequest;
 import org.opensearch.action.support.ActionFilter;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.settings.Setting;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
@@ -59,8 +60,13 @@ public class DslQueryExecutorPlugin extends Plugin implements ActionPlugin {
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
-        this.searchActionFilter = new SearchActionFilter((NodeClient) client);
+        this.searchActionFilter = new SearchActionFilter((NodeClient) client, clusterService);
         return Collections.emptyList();
+    }
+
+    @Override
+    public List<Setting<?>> getSettings() {
+        return List.of(SearchActionFilter.INTERCEPT_SEARCH_ENABLED);
     }
 
     @Override
