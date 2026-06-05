@@ -24,6 +24,7 @@ import org.opensearch.common.concurrent.GatedConditionalCloseable;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.logging.Loggers;
 import org.opensearch.common.lucene.Lucene;
+import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
 import org.opensearch.common.queue.DefaultLockableHolder;
 import org.opensearch.common.queue.LockablePool;
 import org.opensearch.common.unit.TimeValue;
@@ -1796,7 +1797,12 @@ public class DataFormatAwareEngine implements Indexer {
                 IOUtils.closeWhileHandlingException(readerRef);
                 throw new IllegalStateException("No Lucene reader available for composite index " + shardId);
             }
-            final DirectoryReader directoryReader = extractDirectoryReader(luceneReaderObj);
+            final DirectoryReader rawDirectoryReader = extractDirectoryReader(luceneReaderObj);
+            // Wrap in an OpenSearchDirectoryReader so the standard searcher-wrapping path
+            // (IndexShard#wrapSearcher → IndexModule#setReaderWrapper) accepts it. That path rejects
+            // any reader that is not an OpenSearchDirectoryReader. Plugins (e.g. the Parquet DocValues
+            // codec) attach their per-field DocValues view via the registered reader wrapper.
+            final DirectoryReader directoryReader = OpenSearchDirectoryReader.wrap(rawDirectoryReader, shardId);
             logger.info(
                 "[AGG_DELEGATION_TRACE] DataFormatAwareEngine.acquireSearcherSupplier: built searcher from DirectoryReader with [{}] leaves for shard [{}]",
                 directoryReader.leaves().size(),

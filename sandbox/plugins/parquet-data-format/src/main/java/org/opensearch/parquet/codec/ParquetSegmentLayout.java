@@ -31,9 +31,11 @@ import java.util.List;
  *   <li><b>Segment attribute</b> — the composite codec (segment-level {@code DocValuesFormat})
  *       stamps {@link #PARQUET_FILE_ATTRIBUTE} on the {@code SegmentInfo} with the resolved
  *       file path. This is the authoritative binding once composite routing (task 10) is wired.</li>
- *   <li><b>Directory scan</b> — when no attribute is present (e.g. unit tests that write a
- *       single Parquet file alongside the segment), the segment directory and its sibling
- *       {@code parquet/} directory are scanned for a {@code *.parquet} file.</li>
+ *   <li><b>Directory scan</b> — when no attribute is present (e.g. read-time reader wrapping
+ *       against an already-written index, or unit tests that write a single Parquet file
+ *       alongside the segment), the segment directory, a {@code parquet/} subdirectory, and a
+ *       sibling {@code parquet/} directory (the composite-engine deployment layout) are scanned
+ *       for a {@code *.parquet} file.</li>
  * </ol>
  *
  * <p>Returns {@code null} when no Parquet file can be resolved; the producer turns that into a
@@ -62,20 +64,45 @@ public final class ParquetSegmentLayout {
             return Files.exists(p) ? p : null;
         }
 
-        // 2. Fallback: scan the segment directory (and a sibling parquet/ dir) for a .parquet file.
+        // 2. Fallback: scan for a .parquet file across the locations the composite/parquet engines
+        //    use. The composite engine's ParquetIndexingEngine writes files to the shard's
+        //    "parquet/" data directory, which is a *sibling* of the Lucene segment directory
+        //    (shardPath/parquet vs shardPath/index), so we must look both inside the segment
+        //    directory (single-file unit-test layout) and in the sibling parquet/ dir
+        //    (real deployment layout).
         Path dir = directoryPath(state.directory);
         if (dir == null) {
             return null;
         }
-        Path found = firstParquetFile(dir);
-        if (found != null) {
-            return found;
-        }
-        Path parquetSubdir = dir.resolve("parquet");
-        if (Files.isDirectory(parquetSubdir)) {
-            return firstParquetFile(parquetSubdir);
+        for (Path candidate : candidateParquetDirs(dir)) {
+            Path found = firstParquetFile(candidate);
+            if (found != null) {
+                return found;
+            }
         }
         return null;
+    }
+
+    /**
+     * Candidate directories to scan for the segment's Parquet file, in priority order:
+     * <ol>
+     *   <li>the Lucene segment directory itself (unit tests that drop a single {@code .parquet}
+     *       alongside the segment);</li>
+     *   <li>a {@code parquet/} subdirectory of the segment directory;</li>
+     *   <li>a {@code parquet/} directory that is a sibling of the segment directory — the real
+     *       composite-engine layout, where the Lucene index lives in {@code shardPath/index} and
+     *       Parquet files in {@code shardPath/parquet}.</li>
+     * </ol>
+     */
+    private static List<Path> candidateParquetDirs(Path luceneDir) {
+        List<Path> dirs = new ArrayList<>(3);
+        dirs.add(luceneDir);
+        dirs.add(luceneDir.resolve("parquet"));
+        Path parent = luceneDir.getParent();
+        if (parent != null) {
+            dirs.add(parent.resolve("parquet"));
+        }
+        return dirs;
     }
 
     /** Returns the first {@code *.parquet} file in {@code dir} (lexicographically), or null. */
