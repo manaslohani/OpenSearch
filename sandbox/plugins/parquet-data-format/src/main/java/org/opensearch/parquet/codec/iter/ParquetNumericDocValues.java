@@ -8,6 +8,8 @@
 
 package org.opensearch.parquet.codec.iter;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.NumericDocValues;
 import org.opensearch.parquet.bridge.ParquetColumnReader;
 import org.opensearch.parquet.codec.cache.PageCache;
@@ -24,6 +26,8 @@ import java.io.IOException;
  * form directly.
  */
 public final class ParquetNumericDocValues extends NumericDocValues {
+
+    private static final Logger logger = LogManager.getLogger(ParquetNumericDocValues.class);
 
     private final ParquetColumnReader reader;
     private final int maxDoc;
@@ -46,17 +50,34 @@ public final class ParquetNumericDocValues extends NumericDocValues {
         }
         doc = target;
         PageCache cache = reader.cache();
-        if (cache == null || target > cache.lastRow || target < cache.firstRow) {
+        if (cache != null && target <= cache.lastRow && target >= cache.firstRow) {
+            // Layer 1/2 hit — served from the resident page, no FFM crossing.
+            reader.stats().pageCacheHit();
+            if (logger.isTraceEnabled()) {
+                logger.trace("[PARQUET_DV_TRACE] numeric hit (L1/2): doc={} page=[{}-{}]", target, cache.firstRow, cache.lastRow);
+            }
+        } else {
+            // Layer 1/2 miss — load the page containing this row (Layer 3 → 4 → FFM).
+            reader.stats().pageCacheMiss();
+            if (logger.isTraceEnabled()) {
+                logger.trace("[PARQUET_DV_TRACE] numeric miss (L1/2): doc={} -> loading page", target);
+            }
             reader.loadPageContaining(target);
             cache = reader.cache();
             if (cache == null) { // Layer 4: page is all-nulls.
                 currentPresent = false;
                 currentValue = 0L;
+                reader.stats().absent();
                 return false;
             }
         }
         currentPresent = cache.isPresent(target);
         currentValue = currentPresent ? cache.valueAt(target) : 0L;
+        if (currentPresent) {
+            reader.stats().present();
+        } else {
+            reader.stats().absent();
+        }
         return currentPresent;
     }
 

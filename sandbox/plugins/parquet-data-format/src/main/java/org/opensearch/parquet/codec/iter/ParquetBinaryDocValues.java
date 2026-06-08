@@ -8,6 +8,8 @@
 
 package org.opensearch.parquet.codec.iter;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.util.BytesRef;
 import org.opensearch.parquet.bridge.ParquetColumnReader;
@@ -24,6 +26,8 @@ import java.io.IOException;
  * are preserved byte-for-byte.
  */
 public final class ParquetBinaryDocValues extends BinaryDocValues {
+
+    private static final Logger logger = LogManager.getLogger(ParquetBinaryDocValues.class);
 
     private final ParquetColumnReader reader;
     private final int maxDoc;
@@ -46,11 +50,23 @@ public final class ParquetBinaryDocValues extends BinaryDocValues {
         }
         doc = target;
         PageCache cache = reader.cache();
-        if (cache == null || target > cache.lastRow || target < cache.firstRow) {
+        if (cache != null && target <= cache.lastRow && target >= cache.firstRow) {
+            // Layer 1/2 hit — served from the resident page, no FFM crossing.
+            reader.stats().pageCacheHit();
+            if (logger.isTraceEnabled()) {
+                logger.trace("[PARQUET_DV_TRACE] binary hit (L1/2): doc={} page=[{}-{}]", target, cache.firstRow, cache.lastRow);
+            }
+        } else {
+            // Layer 1/2 miss — load the page containing this row (Layer 3 → 4 → FFM).
+            reader.stats().pageCacheMiss();
+            if (logger.isTraceEnabled()) {
+                logger.trace("[PARQUET_DV_TRACE] binary miss (L1/2): doc={} -> loading page", target);
+            }
             reader.loadPageContaining(target);
             cache = reader.cache();
             if (cache == null) { // Layer 4: page is all-nulls.
                 currentPresent = false;
+                reader.stats().absent();
                 return false;
             }
         }
@@ -62,6 +78,9 @@ public final class ParquetBinaryDocValues extends BinaryDocValues {
             scratch.bytes = cache.byteBuf;
             scratch.offset = start;
             scratch.length = end - start;
+            reader.stats().present();
+        } else {
+            reader.stats().absent();
         }
         return currentPresent;
     }

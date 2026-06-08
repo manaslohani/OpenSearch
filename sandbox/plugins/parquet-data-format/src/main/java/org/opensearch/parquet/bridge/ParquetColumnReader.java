@@ -10,6 +10,7 @@ package org.opensearch.parquet.bridge;
 
 import org.opensearch.parquet.codec.ParquetPhysicalType;
 import org.opensearch.parquet.codec.cache.BufferPool;
+import org.opensearch.parquet.codec.cache.CacheStats;
 import org.opensearch.parquet.codec.cache.ColumnPageIndex;
 import org.opensearch.parquet.codec.cache.PageCache;
 
@@ -52,14 +53,17 @@ public final class ParquetColumnReader implements Closeable {
     private final boolean repeated;
     private final BufferPool bufferPool;
     private final Path file;
+    private final String column;
+    private final CacheStats stats = new CacheStats();
 
     private long handle;
     private ColumnPageIndex pageIndex;
     private PageCache cache;
 
-    private ParquetColumnReader(long handle, Path file, ParquetPhysicalType type, boolean repeated, BufferPool bufferPool) {
+    private ParquetColumnReader(long handle, Path file, String column, ParquetPhysicalType type, boolean repeated, BufferPool bufferPool) {
         this.handle = handle;
         this.file = file;
+        this.column = column;
         this.type = type;
         this.repeated = repeated;
         this.bufferPool = bufferPool;
@@ -76,7 +80,7 @@ public final class ParquetColumnReader implements Closeable {
     public static ParquetColumnReader open(Path file, String column, ParquetPhysicalType expected, boolean repeated, BufferPool pool)
         throws IOException {
         long h = RustBridge.openColumnReader(file.toString(), column, expected.code());
-        ParquetColumnReader reader = new ParquetColumnReader(h, file, expected, repeated, pool);
+        ParquetColumnReader reader = new ParquetColumnReader(h, file, column, expected, repeated, pool);
         try {
             reader.pageIndex = reader.loadPageIndex();
         } catch (IOException | RuntimeException e) {
@@ -102,6 +106,11 @@ public final class ParquetColumnReader implements Closeable {
         return pageIndex;
     }
 
+    /** Per-column cache hit/miss counters across all caching layers (for diagnostics). */
+    public CacheStats stats() {
+        return stats;
+    }
+
     /**
      * Returns the currently cached page, or {@code null} when no page is loaded or the last
      * {@link #loadPageContaining(long)} landed on an all-nulls page (Layer 4 skip).
@@ -125,6 +134,7 @@ public final class ParquetColumnReader implements Closeable {
      */
     public Value readValueAtRow(long row) throws IOException {
         ensureOpen();
+        stats.slowValueRead();
         MemorySegment present = bufferPool.longOut("present");
         MemorySegment longOut = bufferPool.longOut("long");
         MemorySegment lenOut = bufferPool.longOut("len");
@@ -145,6 +155,7 @@ public final class ParquetColumnReader implements Closeable {
      */
     public byte[] readBytesAtRow(long row) throws IOException {
         ensureOpen();
+        stats.slowValueRead();
         MemorySegment present = bufferPool.longOut("present");
         MemorySegment longOut = bufferPool.longOut("long");
         MemorySegment lenOut = bufferPool.longOut("len");
@@ -187,6 +198,7 @@ public final class ParquetColumnReader implements Closeable {
      */
     public RepeatedValues readRepeatedAtRow(long row) throws IOException {
         ensureOpen();
+        stats.slowRepeatedRead();
         MemorySegment countOut = bufferPool.longOut("count");
 
         long cap = 8;
@@ -217,6 +229,7 @@ public final class ParquetColumnReader implements Closeable {
      */
     public byte[][] readRepeatedBytesAtRow(long row) throws IOException {
         ensureOpen();
+        stats.slowRepeatedRead();
         MemorySegment countOut = bufferPool.longOut("count");
 
         long countCap = 8;
@@ -266,27 +279,39 @@ public final class ParquetColumnReader implements Closeable {
      */
     public void loadPageContaining(long row) throws IOException {
         ensureOpen();
+        // Layer 3 — OffsetIndex jump-table lookup (consulted on every page miss).
+        stats.pageIndexLookup();
         int pageIdx = pageIndex.pageForRow(row);
         if (pageIdx < 0) {
             throw new IOException("loadPageContaining: row " + row + " out of range (rows " + pageIndex.totalRows() + ")");
         }
         if (pageIndex.isAllNulls(pageIdx)) {
-            logger.info(
-                "[PARQUET_DV_TRACE] loadPageContaining: row={} page={} is ALL-NULLS (Layer 4 skip, no decode) file={}",
-                row,
-                pageIdx,
-                file
-            );
+            // Layer 4 — whole page is null, resolved with no decode.
+            stats.allNullPageSkip();
+            if (logger.isTraceEnabled()) {
+                logger.trace(
+                    "[PARQUET_DV_TRACE] loadPageContaining: col='{}' row={} page={} is ALL-NULLS (Layer 4 skip, no decode) file={}",
+                    column,
+                    row,
+                    pageIdx,
+                    file
+                );
+            }
             cache = null; // Layer 4 — whole page is null, no decode.
             return;
         }
-        logger.info(
-            "[PARQUET_DV_TRACE] loadPageContaining: row={} -> decoding page={} ({} rows) file={}",
-            row,
-            pageIdx,
-            pageIndex.numRowsOf(pageIdx),
-            file
-        );
+        // FFM — page decode crossing.
+        stats.pageDecode();
+        if (logger.isTraceEnabled()) {
+            logger.trace(
+                "[PARQUET_DV_TRACE] loadPageContaining: col='{}' row={} -> decoding page={} ({} rows) [FFM crossing] file={}",
+                column,
+                row,
+                pageIdx,
+                pageIndex.numRowsOf(pageIdx),
+                file
+            );
+        }
         cache = decodePage(row);
     }
 
@@ -446,6 +471,10 @@ public final class ParquetColumnReader implements Closeable {
     public void close() throws IOException {
         if (handle == CLOSED_HANDLE) {
             return;
+        }
+        // Emit the per-column cache effectiveness summary before releasing the handle.
+        if (stats.isEmpty() == false) {
+            logger.info("[PARQUET_DV_CACHE_STATS] col='{}' file={} | {}", column, file, stats.summary());
         }
         long h = handle;
         handle = CLOSED_HANDLE;

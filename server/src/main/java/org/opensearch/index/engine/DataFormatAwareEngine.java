@@ -101,11 +101,13 @@ import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -1798,6 +1800,12 @@ public class DataFormatAwareEngine implements Indexer {
                 throw new IllegalStateException("No Lucene reader available for composite index " + shardId);
             }
             final DirectoryReader rawDirectoryReader = extractDirectoryReader(luceneReaderObj);
+            // Bind each Lucene leaf to its backing Parquet file by matching the leaf's file set
+            // against the catalog snapshot's per-segment Lucene file set, then stamping the resolved
+            // Parquet file path as a SegmentInfo attribute that the Parquet DocValues codec reads back.
+            // This is the authoritative resolution (correct for merged segments, where the per-segment
+            // writer_generation attribute is reset to 0 and a directory scan would pick the wrong file).
+            stampParquetDocValuesFiles(rawDirectoryReader, readerRef.get().catalogSnapshot());
             // Wrap in an OpenSearchDirectoryReader so the standard searcher-wrapping path
             // (IndexShard#wrapSearcher → IndexModule#setReaderWrapper) accepts it. That path rejects
             // any reader that is not an OpenSearchDirectoryReader. Plugins (e.g. the Parquet DocValues
@@ -1852,6 +1860,71 @@ public class DataFormatAwareEngine implements Indexer {
             "Lucene format reader " + luceneReaderObj.getClass().getName()
                 + " does not implement SearchableDirectoryReaderProvider; cannot build searcher"
         );
+    }
+
+    /** SegmentInfo attribute key carrying the absolute Parquet file path backing a leaf's doc values.
+     *  Mirrors {@code ParquetSegmentLayout.PARQUET_FILE_ATTRIBUTE} in the parquet-data-format plugin
+     *  (kept as a string literal here to avoid a server→plugin dependency). */
+    private static final String PARQUET_DOCVALUES_FILE_ATTRIBUTE = "parquet.docvalues.file";
+
+    /**
+     * Binds each Lucene leaf of {@code directoryReader} to its backing Parquet file and stamps the
+     * resolved absolute path onto the leaf's {@link org.apache.lucene.index.SegmentInfo} via
+     * {@link PARQUET_DOCVALUES_FILE_ATTRIBUTE}, so the Parquet DocValues codec can read the right file
+     * without performing an (incorrect, for merged segments) directory scan.
+     *
+     * <p>Resolution matches the leaf's Lucene file set against each catalog {@link Segment}'s Lucene
+     * {@link WriterFileSet#files()} (the same correlation key {@code LuceneReaderManager} uses), then
+     * takes that segment's {@code "parquet"} {@link WriterFileSet} as the backing file. This is robust
+     * for merged segments, whose per-leaf {@code writer_generation} attribute is reset to 0.
+     *
+     * <p>Best-effort: any leaf that cannot be resolved (no catalog match, or no Parquet file in the
+     * matched segment) is left unstamped; the codec then simply serves no Parquet doc values for it
+     * rather than reading the wrong file.
+     */
+    private void stampParquetDocValuesFiles(DirectoryReader directoryReader, CatalogSnapshot catalogSnapshot) {
+        if (catalogSnapshot == null) {
+            return;
+        }
+        // Build: lucene-file-set -> absolute parquet file path, from the catalog snapshot.
+        Map<Set<String>, String> luceneFilesToParquetPath = new HashMap<>();
+        for (Segment segment : catalogSnapshot.getSegments()) {
+            WriterFileSet luceneWfs = segment.dfGroupedSearchableFiles().get("lucene");
+            WriterFileSet parquetWfs = segment.dfGroupedSearchableFiles().get("parquet");
+            if (luceneWfs == null || parquetWfs == null || parquetWfs.files().isEmpty()) {
+                continue;
+            }
+            String parquetFileName = parquetWfs.files().iterator().next();
+            String parquetPath = java.nio.file.Path.of(parquetWfs.directory(), parquetFileName).toString();
+            luceneFilesToParquetPath.put(luceneWfs.files(), parquetPath);
+        }
+        if (luceneFilesToParquetPath.isEmpty()) {
+            return;
+        }
+        for (org.apache.lucene.index.LeafReaderContext lrc : directoryReader.leaves()) {
+            try {
+                org.apache.lucene.index.SegmentReader sr = Lucene.segmentReader(lrc.reader());
+                Set<String> leafFiles = new HashSet<>(sr.getSegmentInfo().files());
+                String parquetPath = luceneFilesToParquetPath.get(leafFiles);
+                if (parquetPath != null) {
+                    sr.getSegmentInfo().info.putAttribute(PARQUET_DOCVALUES_FILE_ATTRIBUTE, parquetPath);
+                    logger.info(
+                        "[PARQUET_DV_TRACE] stampParquetDocValuesFiles: leaf '{}' -> {}",
+                        sr.getSegmentInfo().info.name,
+                        parquetPath
+                    );
+                } else {
+                    logger.warn(
+                        "[PARQUET_DV_TRACE] stampParquetDocValuesFiles: no catalog match for leaf '{}' (files={}); "
+                            + "Parquet doc values unavailable for this segment",
+                        sr.getSegmentInfo().info.name,
+                        leafFiles
+                    );
+                }
+            } catch (IOException | RuntimeException e) {
+                logger.warn("[PARQUET_DV_TRACE] stampParquetDocValuesFiles: failed to bind a leaf to its Parquet file", e);
+            }
+        }
     }
 
     @Override

@@ -105,7 +105,9 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             throw new IllegalStateException(
                 String.format(
                     Locale.ROOT,
-                    "Row ID = Doc ID invariant violated for segment '%s': Lucene maxDoc=%d but Parquet numRows=%d (file=%s)",
+                    "Parquet/Lucene row-count mismatch for segment '%s': Lucene maxDoc=%d but Parquet numRows=%d (file=%s). "
+                        + "The resolved Parquet file must contain exactly the segment's rows; docId→row translation is handled "
+                        + "separately via __row_id__.",
                     state.segmentInfo.name,
                     maxDoc,
                     parquetRowCount,
@@ -114,7 +116,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             );
         }
         logger.info(
-            "[PARQUET_DV_TRACE] producer constructed for segment '{}': file={}, maxDoc={}, parquetRowCount={} (Row ID = Doc ID invariant OK)",
+            "[PARQUET_DV_TRACE] producer constructed for segment '{}': file={}, maxDoc={}, parquetRowCount={} (row counts consistent)",
             state.segmentInfo.name,
             parquetFile,
             maxDoc,
@@ -200,6 +202,30 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     public void close() throws IOException {
         if (closed) {
             return;
+        }
+        // Aggregate cache-effectiveness summary across all columns touched by this segment's
+        // producer. Per-column detail is logged by each ParquetColumnReader on its own close.
+        if (columnReaders.isEmpty() == false) {
+            long hits = 0, misses = 0, decodes = 0, allNullSkips = 0;
+            for (ParquetColumnReader reader : columnReaders.values()) {
+                hits += reader.stats().pageCacheHits();
+                misses += reader.stats().pageCacheMisses();
+                decodes += reader.stats().pageDecodes();
+                allNullSkips += reader.stats().allNullPageSkips();
+            }
+            long lookups = hits + misses;
+            double hitRate = lookups == 0 ? 0.0 : (double) hits / lookups * 100.0;
+            logger.info(
+                "[PARQUET_DV_CACHE_STATS] segment summary: file={} columns={} | L1/2 hits={} misses={} (hitRate={}%) "
+                    + "| L4 allNullSkips={} | FFM pageDecodes={}",
+                parquetFile,
+                columnReaders.size(),
+                hits,
+                misses,
+                String.format(Locale.ROOT, "%.2f", hitRate),
+                allNullSkips,
+                decodes
+            );
         }
         closed = true;
         IOException first = null;

@@ -35,7 +35,10 @@ import java.util.List;
  *       against an already-written index, or unit tests that write a single Parquet file
  *       alongside the segment), the segment directory, a {@code parquet/} subdirectory, and a
  *       sibling {@code parquet/} directory (the composite-engine deployment layout) are scanned
- *       for a {@code *.parquet} file.</li>
+ *       for a {@code *.parquet} file. The scan only resolves when a candidate directory holds
+ *       exactly one Parquet file; if it holds more than one the binding is ambiguous and an
+ *       {@link IOException} is thrown rather than guessing (the {@link #PARQUET_FILE_ATTRIBUTE}
+ *       must be supplied in that case).</li>
  * </ol>
  *
  * <p>Returns {@code null} when no Parquet file can be resolved; the producer turns that into a
@@ -74,8 +77,9 @@ public final class ParquetSegmentLayout {
         if (dir == null) {
             return null;
         }
+        String segmentName = state.segmentInfo.name;
         for (Path candidate : candidateParquetDirs(dir)) {
-            Path found = firstParquetFile(candidate);
+            Path found = singleParquetFile(candidate, segmentName);
             if (found != null) {
                 return found;
             }
@@ -105,8 +109,18 @@ public final class ParquetSegmentLayout {
         return dirs;
     }
 
-    /** Returns the first {@code *.parquet} file in {@code dir} (lexicographically), or null. */
-    private static Path firstParquetFile(Path dir) throws IOException {
+    /**
+     * Returns the single {@code *.parquet} file in {@code dir}, or {@code null} when the directory
+     * has none. When the directory contains <b>more than one</b> Parquet file the segment-to-file
+     * binding is ambiguous (e.g. an un-stamped merged segment whose data directory holds several
+     * per-generation files); guessing lexicographically risks reading the wrong file and returning
+     * silently incorrect values, so this fails loudly with an {@link IOException} instead. The
+     * authoritative path (the {@link #PARQUET_FILE_ATTRIBUTE} stamped by the engine) must be used in
+     * that case.
+     *
+     * @param segmentName the Lucene segment name, included in the error for diagnosability
+     */
+    private static Path singleParquetFile(Path dir, String segmentName) throws IOException {
         if (Files.isDirectory(dir) == false) {
             return null;
         }
@@ -119,7 +133,22 @@ public final class ParquetSegmentLayout {
         if (matches.isEmpty()) {
             return null;
         }
-        matches.sort(Path::compareTo);
+        if (matches.size() > 1) {
+            matches.sort(Path::compareTo);
+            throw new IOException(
+                "Ambiguous Parquet doc-values file for segment '"
+                    + segmentName
+                    + "': directory ["
+                    + dir
+                    + "] contains "
+                    + matches.size()
+                    + " .parquet files "
+                    + matches
+                    + "; cannot safely resolve by directory scan. The backing file must be supplied via the '"
+                    + PARQUET_FILE_ATTRIBUTE
+                    + "' segment attribute (e.g. a merged segment whose file was not stamped)."
+            );
+        }
         return matches.get(0);
     }
 

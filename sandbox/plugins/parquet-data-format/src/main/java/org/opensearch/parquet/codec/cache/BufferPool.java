@@ -8,6 +8,9 @@
 
 package org.opensearch.parquet.codec.cache;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -36,6 +39,8 @@ import java.util.Map;
  */
 public final class BufferPool implements AutoCloseable {
 
+    private static final Logger logger = LogManager.getLogger(BufferPool.class);
+
     /** A pooled slot: its backing segment and the byte capacity that segment was sized to. */
     private static final class Slot {
         MemorySegment segment;
@@ -45,6 +50,11 @@ public final class BufferPool implements AutoCloseable {
     private final Arena arena = Arena.ofConfined();
     private final Map<String, Slot> slots = new HashMap<>();
     private boolean closed;
+
+    // Layer 5 diagnostics: how often a slot request was served from the existing backing
+    // segment (reuse) vs forced a (re)allocation (grow). High reuse = the pool is doing its job.
+    private long reuseCount;
+    private long growCount;
 
     /**
      * Returns the named slot's segment, grown if necessary to hold at least {@code byteSize}
@@ -60,6 +70,9 @@ public final class BufferPool implements AutoCloseable {
             long newCap = s.capacity == 0 ? needed : Math.max(needed, s.capacity * 2);
             s.segment = arena.allocate(newCap);
             s.capacity = newCap;
+            growCount++;
+        } else {
+            reuseCount++;
         }
         return s.segment;
     }
@@ -87,6 +100,34 @@ public final class BufferPool implements AutoCloseable {
         return slots.size();
     }
 
+    /** Layer 5 diagnostics: requests served from an existing backing segment (no allocation). */
+    public long reuseCount() {
+        return reuseCount;
+    }
+
+    /** Layer 5 diagnostics: requests that forced a (re)allocation of a slot's backing segment. */
+    public long growCount() {
+        return growCount;
+    }
+
+    /** Layer 5 reuse rate in [0,1]; 0 when there were no requests. */
+    public double reuseRate() {
+        long total = reuseCount + growCount;
+        return total == 0 ? 0.0 : (double) reuseCount / total;
+    }
+
+    /** Single-line Layer 5 summary suitable for an INFO log. */
+    public String summary() {
+        return String.format(
+            java.util.Locale.ROOT,
+            "L5 buffer-pool: slots=%d reuse=%d grow=%d (reuseRate=%.2f%%)",
+            slots.size(),
+            reuseCount,
+            growCount,
+            reuseRate() * 100.0
+        );
+    }
+
     /** Alias for {@link #close()}, matching the design's "release" vocabulary. */
     public void release() {
         close();
@@ -102,6 +143,9 @@ public final class BufferPool implements AutoCloseable {
     public void close() {
         if (closed == false) {
             closed = true;
+            if (reuseCount + growCount > 0) {
+                logger.info("[PARQUET_DV_CACHE_STATS] {}", summary());
+            }
             slots.clear();
             arena.close();
         }

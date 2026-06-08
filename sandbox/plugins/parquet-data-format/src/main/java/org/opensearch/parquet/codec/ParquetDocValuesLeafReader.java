@@ -28,6 +28,7 @@ import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.store.IOContext;
 import org.opensearch.common.lucene.Lucene;
+import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
 
@@ -211,6 +212,17 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
         return parquetFields.get(field);
     }
 
+    /**
+     * Builds a {@link RowIdResolver} that translates this segment's {@code docId}s to Parquet row
+     * positions by reading the underlying leaf's {@code __row_id__} doc values. Each codec iterator
+     * needs its own resolver (its own {@code __row_id__} iterator), so this is called per DV accessor.
+     * Falls back to identity when the segment has no {@code __row_id__} field.
+     */
+    private RowIdResolver newRowIdResolver() throws IOException {
+        SortedNumericDocValues rowId = in.getSortedNumericDocValues(DocumentInput.ROW_ID_FIELD);
+        return RowIdRemappingDocValues.resolverFrom(rowId);
+    }
+
     @Override
     public FieldInfos getFieldInfos() {
         return mergedFieldInfos;
@@ -220,7 +232,7 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     public NumericDocValues getNumericDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null && fi.getDocValuesType() == DocValuesType.NUMERIC) {
-            return producer().getNumeric(fi);
+            return RowIdRemappingDocValues.numeric(producer().getNumeric(fi), newRowIdResolver(), maxDoc());
         }
         return in.getNumericDocValues(field);
     }
@@ -234,7 +246,7 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
             FieldInfo asSortedNumeric = fi.getDocValuesType() == DocValuesType.SORTED_NUMERIC
                 ? fi
                 : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED_NUMERIC);
-            return producer().getSortedNumeric(asSortedNumeric);
+            return RowIdRemappingDocValues.sortedNumeric(producer().getSortedNumeric(asSortedNumeric), newRowIdResolver(), maxDoc());
         }
         return in.getSortedNumericDocValues(field);
     }
@@ -243,7 +255,7 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     public BinaryDocValues getBinaryDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null && fi.getDocValuesType() == DocValuesType.BINARY) {
-            return producer().getBinary(fi);
+            return RowIdRemappingDocValues.binary(producer().getBinary(fi), newRowIdResolver(), maxDoc());
         }
         return in.getBinaryDocValues(field);
     }
@@ -252,7 +264,7 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     public SortedDocValues getSortedDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null && fi.getDocValuesType() == DocValuesType.SORTED) {
-            return producer().getSorted(fi);
+            return RowIdRemappingDocValues.sorted(producer().getSorted(fi), newRowIdResolver(), maxDoc());
         }
         return in.getSortedDocValues(field);
     }
@@ -264,7 +276,7 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
             FieldInfo asSortedSet = fi.getDocValuesType() == DocValuesType.SORTED_SET
                 ? fi
                 : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED_SET);
-            return producer().getSortedSet(asSortedSet);
+            return RowIdRemappingDocValues.sortedSet(producer().getSortedSet(asSortedSet), newRowIdResolver(), maxDoc());
         }
         return in.getSortedSetDocValues(field);
     }
