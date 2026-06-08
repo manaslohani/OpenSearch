@@ -11,6 +11,7 @@ package org.opensearch.parquet.codec;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.BinaryDocValues;
+import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.DocValuesSkipIndexType;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
@@ -241,12 +242,26 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     public SortedNumericDocValues getSortedNumericDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null) {
-            // A numeric mapping's single-valued DV type is NUMERIC, but OpenSearch numeric
-            // value sources request SORTED_NUMERIC. The producer validates against both forms.
-            FieldInfo asSortedNumeric = fi.getDocValuesType() == DocValuesType.SORTED_NUMERIC
+            // OpenSearch numeric value sources request SORTED_NUMERIC even for single-valued fields,
+            // then call DocValues.unwrapSingleton(...) to take a leaner single-valued collector when
+            // possible. We therefore serve single-valued numerics through the CACHED single-valued
+            // iterator (producer().getNumeric → ParquetNumericDocValues → PageCache hot path), apply
+            // the docId→row remapping at the numeric level, and wrap the result with
+            // DocValues.singleton(...) so the returned value is a real SingletonSortedNumericDocValues
+            // that unwrapSingleton(...) can detect. This wins on two layers: the PageCache (no per-doc
+            // FFM call) and the aggregator's single-valued fast path.
+            //
+            // TODO(multi-value): this intentionally treats every numeric field as single-valued and so
+            // breaks true multi-valued (array) numeric fields. Restore the repeated path for genuinely
+            // multi-valued columns (e.g. branch on the Parquet column's repetition level) and return
+            // RowIdRemappingDocValues.sortedNumeric(producer().getSortedNumeric(asSortedNumeric),
+            // newRowIdResolver(), maxDoc()) for those.
+            FieldInfo asNumeric = fi.getDocValuesType() == DocValuesType.NUMERIC
                 ? fi
-                : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED_NUMERIC);
-            return RowIdRemappingDocValues.sortedNumeric(producer().getSortedNumeric(asSortedNumeric), newRowIdResolver(), maxDoc());
+                : newDocValuesFieldInfo(field, fi.number, DocValuesType.NUMERIC);
+            NumericDocValues numeric = producer().getNumeric(asNumeric);
+            NumericDocValues remapped = RowIdRemappingDocValues.numeric(numeric, newRowIdResolver(), maxDoc());
+            return DocValues.singleton(remapped);
         }
         return in.getSortedNumericDocValues(field);
     }
@@ -273,10 +288,22 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     public SortedSetDocValues getSortedSetDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null) {
-            FieldInfo asSortedSet = fi.getDocValuesType() == DocValuesType.SORTED_SET
+            // Mirror getSortedNumericDocValues: keyword value sources request SORTED_SET even for
+            // single-valued fields, then call DocValues.unwrapSingleton(...). Serve single-valued
+            // keywords through the single-valued ordinal-table iterator (producer().getSorted →
+            // ParquetSortedDocValues), remap docId→row, and wrap with DocValues.singleton(...) so the
+            // returned value is a real SingletonSortedSetDocValues that unwrapSingleton(...) detects.
+            //
+            // TODO(multi-value): intentionally treats every keyword field as single-valued and so breaks
+            // true multi-valued (array) keyword fields. Restore the multi-valued path for genuinely
+            // repeated columns and return RowIdRemappingDocValues.sortedSet(
+            // producer().getSortedSet(asSortedSet), newRowIdResolver(), maxDoc()) for those.
+            FieldInfo asSorted = fi.getDocValuesType() == DocValuesType.SORTED
                 ? fi
-                : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED_SET);
-            return RowIdRemappingDocValues.sortedSet(producer().getSortedSet(asSortedSet), newRowIdResolver(), maxDoc());
+                : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED);
+            SortedDocValues sorted = producer().getSorted(asSorted);
+            SortedDocValues remapped = RowIdRemappingDocValues.sorted(sorted, newRowIdResolver(), maxDoc());
+            return DocValues.singleton(remapped);
         }
         return in.getSortedSetDocValues(field);
     }
