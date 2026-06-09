@@ -28,7 +28,10 @@ import java.util.concurrent.atomic.LongAdder;
 public final class QueryParquetStats {
 
     private final ConcurrentLinkedQueue<CacheStats> registered = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<RowIdStats> rowIdRegistered = new ConcurrentLinkedQueue<>();
     private final LongAdder producerSetupNanos = new LongAdder();
+    private final LongAdder readerOpenNanos = new LongAdder();
+    private final LongAdder readerCloseNanos = new LongAdder();
 
     /** Registers a column reader's stats; its counters are summed live when {@link #summary()} runs. */
     public void register(CacheStats s) {
@@ -37,14 +40,31 @@ public final class QueryParquetStats {
         }
     }
 
+    /** Registers a resolver's docId&rarr;row translation stats; summed live at {@link #summary()}. */
+    public void registerRowId(RowIdStats s) {
+        if (s != null) {
+            rowIdRegistered.add(s);
+        }
+    }
+
     /** Adds time spent constructing a producer (file resolve + metadata read) for one segment. */
     public void addProducerSetupNanos(long nanos) {
         producerSetupNanos.add(nanos);
     }
 
+    /** Adds time spent in the native {@code openColumnReader} FFM crossing (once per column). */
+    public void addReaderOpenNanos(long nanos) {
+        readerOpenNanos.add(nanos);
+    }
+
+    /** Adds time spent in the native {@code closeColumnReader} FFM crossing (once per column). */
+    public void addReaderCloseNanos(long nanos) {
+        readerCloseNanos.add(nanos);
+    }
+
     /** True when nothing was recorded (used to suppress an empty summary). */
     public boolean isEmpty() {
-        return registered.isEmpty() && producerSetupNanos.sum() == 0;
+        return registered.isEmpty() && rowIdRegistered.isEmpty() && producerSetupNanos.sum() == 0;
     }
 
     /** A single-line, human-readable per-query summary. */
@@ -69,19 +89,35 @@ public final class QueryParquetStats {
             pageIndexLoadNanos += s.pageIndexLoadNanos();
             slowReadNanos += s.slowReadNanos();
         }
+        // RowId docId->row translation layer (sampled timing, extrapolated).
+        long rowIdResolvers = 0, rowIdIdentity = 0, rowIdLookups = 0, rowIdEstNanos = 0;
+        for (RowIdStats r : rowIdRegistered) {
+            rowIdResolvers++;
+            if (r.isIdentity()) {
+                rowIdIdentity++;
+            }
+            rowIdLookups += r.lookups();
+            rowIdEstNanos += r.estimatedTotalNanos();
+        }
+
         long lookups = hits + misses;
         double hitRate = lookups == 0 ? 0.0 : (double) hits / lookups * 100.0;
         double decodeMs = pageDecodeNanos / 1_000_000.0;
         double indexLoadMs = pageIndexLoadNanos / 1_000_000.0;
         double slowReadMs = slowReadNanos / 1_000_000.0;
         double setupMs = producerSetupNanos.sum() / 1_000_000.0;
-        double totalParquetMs = decodeMs + indexLoadMs + slowReadMs + setupMs;
+        double readerOpenMs = readerOpenNanos.sum() / 1_000_000.0;
+        double readerCloseMs = readerCloseNanos.sum() / 1_000_000.0;
+        double rowIdMs = rowIdEstNanos / 1_000_000.0;
+        double totalParquetMs = decodeMs + indexLoadMs + slowReadMs + setupMs + readerOpenMs + readerCloseMs + rowIdMs;
         return String.format(
             Locale.ROOT,
             "segments/columns=%d | L1/2 cache: hits=%d misses=%d (hitRate=%.2f%%) | "
                 + "L3 jumpTableLookups=%d | L4 allNullSkips=%d | "
                 + "FFM: pageDecodes=%d slowValueReads=%d slowRepeatedReads=%d | "
-                + "timings(ms): pageDecode=%.1f pageIndexLoad=%.1f slowRead=%.1f producerSetup=%.1f totalParquetTime=%.1f | "
+                + "RowId: resolvers=%d identity=%d lookups=%d | "
+                + "timings(ms): pageDecode=%.1f pageIndexLoad=%.1f slowRead=%.1f rowIdRemap~=%.1f "
+                + "readerOpen=%.1f readerClose=%.1f producerSetup=%.1f totalParquetTime=%.1f | "
                 + "values: present=%d absent=%d",
             columns,
             hits,
@@ -92,9 +128,15 @@ public final class QueryParquetStats {
             pageDecodes,
             slowValueReads,
             slowRepeatedReads,
+            rowIdResolvers,
+            rowIdIdentity,
+            rowIdLookups,
             decodeMs,
             indexLoadMs,
             slowReadMs,
+            rowIdMs,
+            readerOpenMs,
+            readerCloseMs,
             setupMs,
             totalParquetMs,
             present,

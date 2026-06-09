@@ -64,6 +64,9 @@ public final class ParquetColumnReader implements Closeable {
     /** Optional per-query accumulator; this reader's {@link #stats} are folded in on {@link #close()}. */
     private QueryParquetStats queryStats;
 
+    /** Nanoseconds in the native {@code openColumnReader} FFM call; flushed when query stats attach. */
+    private long openNanos;
+
     private ParquetColumnReader(long handle, Path file, String column, ParquetPhysicalType type, boolean repeated, BufferPool bufferPool) {
         this.handle = handle;
         this.file = file;
@@ -83,8 +86,11 @@ public final class ParquetColumnReader implements Closeable {
      */
     public static ParquetColumnReader open(Path file, String column, ParquetPhysicalType expected, boolean repeated, BufferPool pool)
         throws IOException {
+        long openStart = System.nanoTime();
         long h = RustBridge.openColumnReader(file.toString(), column, expected.code());
+        long openElapsed = System.nanoTime() - openStart;
         ParquetColumnReader reader = new ParquetColumnReader(h, file, column, expected, repeated, pool);
+        reader.openNanos = openElapsed;
         try {
             long indexStart = System.nanoTime();
             reader.pageIndex = reader.loadPageIndex();
@@ -126,6 +132,7 @@ public final class ParquetColumnReader implements Closeable {
         this.queryStats = queryStats;
         if (queryStats != null) {
             queryStats.register(stats);
+            queryStats.addReaderOpenNanos(openNanos);
         }
     }
 
@@ -520,6 +527,10 @@ public final class ParquetColumnReader implements Closeable {
         long h = handle;
         handle = CLOSED_HANDLE;
         cache = null;
+        long closeStart = System.nanoTime();
         RustBridge.closeColumnReader(h);
+        if (queryStats != null) {
+            queryStats.addReaderCloseNanos(System.nanoTime() - closeStart);
+        }
     }
 }

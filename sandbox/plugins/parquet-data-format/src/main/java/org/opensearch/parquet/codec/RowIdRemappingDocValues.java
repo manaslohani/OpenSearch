@@ -15,6 +15,7 @@ import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.util.BytesRef;
+import org.opensearch.parquet.codec.cache.RowIdStats;
 
 import java.io.IOException;
 
@@ -309,17 +310,47 @@ final class RowIdRemappingDocValues {
      * resolver (backed by its own {@code __row_id__} iterator) per codec iterator.
      */
     static RowIdResolver resolverFrom(SortedNumericDocValues rowIdDocValues) {
+        return resolverFrom(rowIdDocValues, null);
+    }
+
+    /**
+     * As {@link #resolverFrom(SortedNumericDocValues)}, but records translation activity into
+     * {@code stats} (lookup count + sampled timing). When {@code stats} is null, no instrumentation
+     * is added (the resolver is the plain hot path). Timing is sampled — see {@link RowIdStats} — so
+     * the per-document {@code System.nanoTime()} cost does not dominate on 100M+ document queries.
+     */
+    static RowIdResolver resolverFrom(SortedNumericDocValues rowIdDocValues, RowIdStats stats) {
         if (rowIdDocValues == null) {
+            if (stats != null) {
+                stats.markIdentity();
+            }
             return RowIdResolver.IDENTITY;
         }
+        if (stats == null) {
+            return docId -> {
+                if (rowIdDocValues.advanceExact(docId) == false) {
+                    throw new IllegalStateException(
+                        "missing __row_id__ doc value for docId=" + docId + "; cannot translate to Parquet row position"
+                    );
+                }
+                return rowIdDocValues.nextValue();
+            };
+        }
         return docId -> {
+            boolean sample = (stats.lookups() & RowIdStats.SAMPLE_MASK) == 0L;
+            long startNanos = sample ? System.nanoTime() : 0L;
             if (rowIdDocValues.advanceExact(docId) == false) {
                 throw new IllegalStateException(
                     "missing __row_id__ doc value for docId=" + docId + "; cannot translate to Parquet row position"
                 );
             }
             // __row_id__ is single-valued; take the first (and only) value.
-            return rowIdDocValues.nextValue();
+            long rowId = rowIdDocValues.nextValue();
+            if (sample) {
+                stats.recordSample(System.nanoTime() - startNanos);
+            }
+            stats.recordLookup();
+            return rowId;
         };
     }
 }

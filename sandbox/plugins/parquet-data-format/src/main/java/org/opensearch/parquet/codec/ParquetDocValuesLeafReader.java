@@ -33,6 +33,7 @@ import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.parquet.codec.cache.QueryParquetStats;
+import org.opensearch.parquet.codec.cache.RowIdStats;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -231,7 +232,12 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
      */
     private RowIdResolver newRowIdResolver() throws IOException {
         SortedNumericDocValues rowId = in.getSortedNumericDocValues(DocumentInput.ROW_ID_FIELD);
-        return RowIdRemappingDocValues.resolverFrom(rowId);
+        if (queryStats == null) {
+            return RowIdRemappingDocValues.resolverFrom(rowId);
+        }
+        RowIdStats rowIdStats = new RowIdStats();
+        queryStats.registerRowId(rowIdStats);
+        return RowIdRemappingDocValues.resolverFrom(rowId, rowIdStats);
     }
 
     @Override
