@@ -32,6 +32,7 @@ import org.opensearch.common.lucene.Lucene;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
+import org.opensearch.parquet.codec.cache.QueryParquetStats;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -85,18 +86,23 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     /** The segment read state used to build the producer (captured at construction). */
     private final SegmentReadState segmentReadState;
 
+    /** Per-query stats accumulator shared across all leaves of one search; may be null in tests. */
+    private final QueryParquetStats queryStats;
+
     private ParquetDocValuesLeafReader(
         LeafReader in,
         MapperService mapperService,
         SegmentReadState segmentReadState,
         Map<String, FieldInfo> parquetFields,
-        FieldInfos mergedFieldInfos
+        FieldInfos mergedFieldInfos,
+        QueryParquetStats queryStats
     ) {
         super(in);
         this.mapperService = mapperService;
         this.segmentReadState = segmentReadState;
         this.parquetFields = parquetFields;
         this.mergedFieldInfos = mergedFieldInfos;
+        this.queryStats = queryStats;
     }
 
     /**
@@ -104,7 +110,8 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
      * segment and the mapping declares at least one Parquet-codec-supported field that is missing
      * doc values in the Lucene segment. Otherwise returns {@code in} unwrapped.
      */
-    public static LeafReader wrapIfApplicable(LeafReader in, MapperService mapperService) throws IOException {
+    public static LeafReader wrapIfApplicable(LeafReader in, MapperService mapperService, QueryParquetStats queryStats)
+        throws IOException {
         SegmentReader segmentReader;
         try {
             segmentReader = Lucene.segmentReader(in);
@@ -167,13 +174,15 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
         }
 
         FieldInfos mergedInfos = new FieldInfos(merged.toArray(new FieldInfo[0]));
-        logger.info(
-            "[PARQUET_DV_TRACE] ParquetDocValuesLeafReader: wrapping segment '{}' to serve {} Parquet-resident field(s): {}",
-            segmentReader.getSegmentInfo().info.name,
-            parquetFields.size(),
-            parquetFields.keySet()
-        );
-        return new ParquetDocValuesLeafReader(in, mapperService, state, parquetFields, mergedInfos);
+        if (logger.isDebugEnabled()) {
+            logger.debug(
+                "[PARQUET_DV_TRACE] ParquetDocValuesLeafReader: wrapping segment '{}' to serve {} Parquet-resident field(s): {}",
+                segmentReader.getSegmentInfo().info.name,
+                parquetFields.size(),
+                parquetFields.keySet()
+            );
+        }
+        return new ParquetDocValuesLeafReader(in, mapperService, state, parquetFields, mergedInfos, queryStats);
     }
 
     /** Builds a synthetic doc-values {@link FieldInfo} carrying the given DV type. */
@@ -203,6 +212,7 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     private synchronized ParquetDocValuesProducer producer() throws IOException {
         if (producerInitialized == false) {
             producer = new ParquetDocValuesProducer(segmentReadState, mapperService);
+            producer.setQueryStats(queryStats);
             producerInitialized = true;
         }
         return producer;

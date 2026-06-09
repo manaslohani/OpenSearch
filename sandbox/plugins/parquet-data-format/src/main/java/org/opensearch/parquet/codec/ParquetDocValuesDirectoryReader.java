@@ -8,10 +8,13 @@
 
 package org.opensearch.parquet.codec;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.FilterDirectoryReader;
 import org.apache.lucene.index.LeafReader;
 import org.opensearch.index.mapper.MapperService;
+import org.opensearch.parquet.codec.cache.QueryParquetStats;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -31,11 +34,16 @@ import java.io.UncheckedIOException;
  */
 public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader {
 
-    private final MapperService mapperService;
+    private static final Logger logger = LogManager.getLogger(ParquetDocValuesDirectoryReader.class);
 
-    private ParquetDocValuesDirectoryReader(DirectoryReader in, MapperService mapperService) throws IOException {
-        super(in, new ParquetSubReaderWrapper(mapperService));
+    private final MapperService mapperService;
+    private final QueryParquetStats queryStats;
+
+    private ParquetDocValuesDirectoryReader(DirectoryReader in, MapperService mapperService, QueryParquetStats queryStats)
+        throws IOException {
+        super(in, new ParquetSubReaderWrapper(mapperService, queryStats));
         this.mapperService = mapperService;
+        this.queryStats = queryStats;
     }
 
     /**
@@ -43,12 +51,13 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
      * code paths.
      */
     public static DirectoryReader wrap(DirectoryReader in, MapperService mapperService) throws IOException {
-        return new ParquetDocValuesDirectoryReader(in, mapperService);
+        return new ParquetDocValuesDirectoryReader(in, mapperService, new QueryParquetStats());
     }
 
     @Override
     protected DirectoryReader doWrapDirectoryReader(DirectoryReader in) throws IOException {
-        return new ParquetDocValuesDirectoryReader(in, mapperService);
+        // A reopened reader is a fresh search view; give it its own accumulator.
+        return new ParquetDocValuesDirectoryReader(in, mapperService, new QueryParquetStats());
     }
 
     @Override
@@ -58,18 +67,34 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
         return in.getReaderCacheHelper();
     }
 
+    @Override
+    protected void doClose() throws IOException {
+        // Close the wrapped leaves FIRST: that is what closes each ParquetDocValuesProducer and its
+        // ParquetColumnReaders, and the per-column stats are merged into queryStats during that close.
+        // Only then is the per-query accumulator fully populated and safe to summarize.
+        try {
+            super.doClose();
+        } finally {
+            if (queryStats != null && queryStats.isEmpty() == false) {
+                logger.info("[PARQUET_DV_QUERY_STATS] {}", queryStats.summary());
+            }
+        }
+    }
+
     /** Per-leaf wrapper that swaps in {@link ParquetDocValuesLeafReader} when applicable. */
     private static final class ParquetSubReaderWrapper extends SubReaderWrapper {
         private final MapperService mapperService;
+        private final QueryParquetStats queryStats;
 
-        private ParquetSubReaderWrapper(MapperService mapperService) {
+        private ParquetSubReaderWrapper(MapperService mapperService, QueryParquetStats queryStats) {
             this.mapperService = mapperService;
+            this.queryStats = queryStats;
         }
 
         @Override
         public LeafReader wrap(LeafReader reader) {
             try {
-                return ParquetDocValuesLeafReader.wrapIfApplicable(reader, mapperService);
+                return ParquetDocValuesLeafReader.wrapIfApplicable(reader, mapperService, queryStats);
             } catch (IOException e) {
                 // SubReaderWrapper.wrap cannot throw checked exceptions; surface as unchecked so
                 // the search fails loudly rather than silently dropping Parquet doc values.

@@ -45,6 +45,11 @@ public final class CacheStats {
     private long slowValueReads;    // parquet_read_value_at_row (single)
     private long slowRepeatedReads; // parquet_read_repeated_at_row
 
+    // Section timings (nanoseconds), to attribute query latency to a specific phase.
+    private long pageDecodeNanos;    // time inside the FFM page decode
+    private long pageIndexLoadNanos; // time building the Layer 3 ColumnPageIndex at reader open
+    private long slowReadNanos;      // time inside slow-path single/repeated FFM reads
+
     /** Records a Layer 1/2 page-cache hit (row served from the resident page, no FFM). */
     public void pageCacheHit() {
         pageCacheHits++;
@@ -90,6 +95,21 @@ public final class CacheStats {
         slowRepeatedReads++;
     }
 
+    /** Adds elapsed nanoseconds spent inside an FFM page decode. */
+    public void addPageDecodeNanos(long nanos) {
+        pageDecodeNanos += nanos;
+    }
+
+    /** Adds elapsed nanoseconds spent building the Layer 3 page index at reader open. */
+    public void addPageIndexLoadNanos(long nanos) {
+        pageIndexLoadNanos += nanos;
+    }
+
+    /** Adds elapsed nanoseconds spent inside a slow-path single/repeated FFM read. */
+    public void addSlowReadNanos(long nanos) {
+        slowReadNanos += nanos;
+    }
+
     public long pageCacheHits() {
         return pageCacheHits;
     }
@@ -104,6 +124,38 @@ public final class CacheStats {
 
     public long allNullPageSkips() {
         return allNullPageSkips;
+    }
+
+    public long pageIndexLookups() {
+        return pageIndexLookups;
+    }
+
+    public long presentValues() {
+        return presentValues;
+    }
+
+    public long absentValues() {
+        return absentValues;
+    }
+
+    public long slowValueReads() {
+        return slowValueReads;
+    }
+
+    public long slowRepeatedReads() {
+        return slowRepeatedReads;
+    }
+
+    public long pageDecodeNanos() {
+        return pageDecodeNanos;
+    }
+
+    public long pageIndexLoadNanos() {
+        return pageIndexLoadNanos;
+    }
+
+    public long slowReadNanos() {
+        return slowReadNanos;
     }
 
     /** Total page-cache lookups (hits + misses). */
@@ -133,6 +185,7 @@ public final class CacheStats {
             Locale.ROOT,
             "L1/2 page-cache: hits=%d misses=%d (hitRate=%.2f%%) | L3 jumpTableLookups=%d | "
                 + "L4 allNullSkips=%d | FFM: pageDecodes=%d slowValueReads=%d slowRepeatedReads=%d (totalCrossings=%d) | "
+                + "timings(ms): pageDecode=%.1f pageIndexLoad=%.1f slowRead=%.1f | "
                 + "values: present=%d absent=%d",
             pageCacheHits,
             pageCacheMisses,
@@ -143,6 +196,9 @@ public final class CacheStats {
             slowValueReads,
             slowRepeatedReads,
             ffmCrossings(),
+            pageDecodeNanos / 1_000_000.0,
+            pageIndexLoadNanos / 1_000_000.0,
+            slowReadNanos / 1_000_000.0,
             presentValues,
             absentValues
         );

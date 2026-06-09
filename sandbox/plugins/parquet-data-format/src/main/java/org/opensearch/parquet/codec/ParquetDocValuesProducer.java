@@ -26,6 +26,7 @@ import org.opensearch.parquet.bridge.ParquetColumnReader;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.codec.cache.BufferPool;
+import org.opensearch.parquet.codec.cache.QueryParquetStats;
 import org.opensearch.parquet.codec.iter.ParquetBinaryDocValues;
 import org.opensearch.parquet.codec.iter.ParquetNumericDocValues;
 import org.opensearch.parquet.codec.iter.ParquetSortedDocValues;
@@ -72,6 +73,11 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private final Map<String, ParquetColumnReader> columnReaders = new HashMap<>();
     private final Map<String, OrdinalTable> ordinalTables = new HashMap<>();
 
+    /** Nanoseconds spent in producer setup (file resolve + metadata read); flushed when query stats are attached. */
+    private final long setupNanos;
+    /** Optional per-query accumulator; propagated to each column reader so its stats roll up at close. */
+    private QueryParquetStats queryStats;
+
     private boolean closed;
 
     /**
@@ -83,6 +89,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
      * @throws IllegalStateException if the Row ID = Doc ID invariant is violated (Req 12.3)
      */
     public ParquetDocValuesProducer(SegmentReadState state, MapperService mapperService) throws IOException {
+        long setupStart = System.nanoTime();
         this.mapperService = mapperService;
         this.maxDoc = state.segmentInfo.maxDoc();
 
@@ -115,13 +122,31 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
                 )
             );
         }
-        logger.info(
-            "[PARQUET_DV_TRACE] producer constructed for segment '{}': file={}, maxDoc={}, parquetRowCount={} (row counts consistent)",
-            state.segmentInfo.name,
-            parquetFile,
-            maxDoc,
-            parquetRowCount
-        );
+        this.setupNanos = System.nanoTime() - setupStart;
+        if (logger.isDebugEnabled()) {
+            logger.debug(
+                "[PARQUET_DV_TRACE] producer constructed for segment '{}': file={}, maxDoc={}, parquetRowCount={} (row counts consistent)",
+                state.segmentInfo.name,
+                parquetFile,
+                maxDoc,
+                parquetRowCount
+            );
+        }
+    }
+
+    /**
+     * Attaches the per-query accumulator. The producer's setup time is folded in immediately, and
+     * the accumulator is propagated to every column reader (existing and future) so each reader's
+     * stats roll up into the query total when it closes.
+     */
+    public void setQueryStats(QueryParquetStats queryStats) {
+        this.queryStats = queryStats;
+        if (queryStats != null) {
+            queryStats.addProducerSetupNanos(setupNanos);
+            for (ParquetColumnReader reader : columnReaders.values()) {
+                reader.setQueryStats(queryStats);
+            }
+        }
     }
 
     // ── DocValuesProducer API ──
@@ -129,7 +154,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public NumericDocValues getNumeric(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.info("[PARQUET_DV_TRACE] getNumeric: field='{}' segment file={}", field.getName(), parquetFile);
+        logger.debug("[PARQUET_DV_TRACE] getNumeric: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.NUMERIC);
         ParquetColumnReader reader = readerFor(field, false);
         return new ParquetNumericDocValues(reader, maxDoc);
@@ -138,7 +163,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.info("[PARQUET_DV_TRACE] getSortedNumeric: field='{}' segment file={}", field.getName(), parquetFile);
+        logger.debug("[PARQUET_DV_TRACE] getSortedNumeric: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.SORTED_NUMERIC);
         ParquetColumnReader reader = readerFor(field, true);
         return new ParquetSortedNumericDocValues(reader, maxDoc);
@@ -147,7 +172,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public BinaryDocValues getBinary(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.info("[PARQUET_DV_TRACE] getBinary: field='{}' segment file={}", field.getName(), parquetFile);
+        logger.debug("[PARQUET_DV_TRACE] getBinary: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.BINARY);
         ParquetColumnReader reader = readerFor(field, false);
         return new ParquetBinaryDocValues(reader, maxDoc);
@@ -156,7 +181,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public SortedDocValues getSorted(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.info("[PARQUET_DV_TRACE] getSorted: field='{}' segment file={}", field.getName(), parquetFile);
+        logger.debug("[PARQUET_DV_TRACE] getSorted: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.SORTED);
         OrdinalTable table = ordinalTableFor(field, false);
         return new ParquetSortedDocValues(table, maxDoc);
@@ -165,7 +190,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public SortedSetDocValues getSortedSet(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.info("[PARQUET_DV_TRACE] getSortedSet: field='{}' segment file={}", field.getName(), parquetFile);
+        logger.debug("[PARQUET_DV_TRACE] getSortedSet: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.SORTED_SET);
         OrdinalTable table = ordinalTableFor(field, true);
         return new ParquetSortedSetDocValues(table, maxDoc);
@@ -205,7 +230,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         }
         // Aggregate cache-effectiveness summary across all columns touched by this segment's
         // producer. Per-column detail is logged by each ParquetColumnReader on its own close.
-        if (columnReaders.isEmpty() == false) {
+        if (columnReaders.isEmpty() == false && logger.isDebugEnabled()) {
             long hits = 0, misses = 0, decodes = 0, allNullSkips = 0;
             for (ParquetColumnReader reader : columnReaders.values()) {
                 hits += reader.stats().pageCacheHits();
@@ -215,7 +240,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             }
             long lookups = hits + misses;
             double hitRate = lookups == 0 ? 0.0 : (double) hits / lookups * 100.0;
-            logger.info(
+            logger.debug(
                 "[PARQUET_DV_CACHE_STATS] segment summary: file={} columns={} | L1/2 hits={} misses={} (hitRate={}%) "
                     + "| L4 allNullSkips={} | FFM pageDecodes={}",
                 parquetFile,
@@ -282,13 +307,16 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private ParquetColumnReader readerFor(FieldInfo field, boolean repeated) throws IOException {
         ParquetColumnReader reader = columnReaders.get(field.getName());
         if (reader == null) {
-            logger.info(
-                "[PARQUET_DV_TRACE] opening native column reader: field='{}', physicalType={}, repeated={}",
-                field.getName(),
-                physicalType(field),
-                repeated
-            );
+            if (logger.isDebugEnabled()) {
+                logger.debug(
+                    "[PARQUET_DV_TRACE] opening native column reader: field='{}', physicalType={}, repeated={}",
+                    field.getName(),
+                    physicalType(field),
+                    repeated
+                );
+            }
             reader = ParquetColumnReader.open(parquetFile, field.getName(), physicalType(field), repeated, bufferPool);
+            reader.setQueryStats(queryStats);
             columnReaders.put(field.getName(), reader);
         }
         return reader;
