@@ -17,29 +17,23 @@ package org.opensearch.parquet.codec.cache;
  * synchronization, mirroring {@link CacheStats}. It is registered once with the query-scoped
  * {@code QueryParquetStats} and summed live at end of query.
  *
- * <h2>Why timing is sampled</h2>
- * {@code toRowId(docId)} runs once per document &mdash; up to 100M+ times per query. Calling
- * {@code System.nanoTime()} on every call (~20-30ns each) would add seconds of pure measurement
- * overhead and corrupt the result. Instead the resolver times only one in every
- * {@code 1/SAMPLE_RATE} calls and the total is extrapolated from the samples (the same approach
- * OpenSearch's own {@code search.profile.Timer} uses).
+ * <h2>Counts only &mdash; no per-call timing</h2>
+ * Only <b>counts</b> are tracked here ({@link #lookups()} and the {@link #isIdentity() identity}
+ * flag), never per-call time. {@code toRowId(docId)} runs once per document (up to 100M+ times per
+ * query); the work per call is on the order of tens of nanoseconds, comparable to
+ * {@code System.nanoTime()} itself, so code-timing each call cannot produce a trustworthy figure
+ * (it inflates and, when extrapolated, exceeds the whole query time). The honest signal is the
+ * exact lookup <b>count</b> here; the actual wall-clock spent in this layer is obtained from a CPU
+ * flamegraph (async-profiler), which attributes real per-method time without instrumentation
+ * overhead.
  */
 public final class RowIdStats {
-
-    /** Sample one call in every {@code SAMPLE_MASK + 1} (power-of-two mask for a cheap test). */
-    public static final long SAMPLE_MASK = 1023L;
 
     /** True when this resolver is the no-op IDENTITY mapping (segment has docId == rowId). */
     private boolean identity;
 
     /** Number of {@code toRowId} calls that performed a {@code __row_id__} lookup. */
     private long lookups;
-
-    /** Number of timed samples taken. */
-    private long sampledCalls;
-
-    /** Total nanoseconds across the sampled calls. */
-    private long sampledNanos;
 
     /** Marks this resolver as the IDENTITY (no-op) mapping. */
     public void markIdentity() {
@@ -51,37 +45,12 @@ public final class RowIdStats {
         lookups++;
     }
 
-    /** Records one timed sample's elapsed nanoseconds. */
-    public void recordSample(long nanos) {
-        sampledCalls++;
-        sampledNanos += nanos;
-    }
-
     public boolean isIdentity() {
         return identity;
     }
 
     public long lookups() {
         return lookups;
-    }
-
-    public long sampledCalls() {
-        return sampledCalls;
-    }
-
-    public long sampledNanos() {
-        return sampledNanos;
-    }
-
-    /**
-     * Total time spent in this resolver's {@code __row_id__} lookups, extrapolated from the samples:
-     * {@code avgSampleNanos * lookups}. Returns 0 when nothing was sampled.
-     */
-    public long estimatedTotalNanos() {
-        if (sampledCalls == 0) {
-            return 0L;
-        }
-        return (long) ((double) sampledNanos / sampledCalls * lookups);
     }
 
     /** True when this resolver did no work (not used / no lookups and not marked identity). */

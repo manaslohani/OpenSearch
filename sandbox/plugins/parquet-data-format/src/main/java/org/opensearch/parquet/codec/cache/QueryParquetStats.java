@@ -89,15 +89,15 @@ public final class QueryParquetStats {
             pageIndexLoadNanos += s.pageIndexLoadNanos();
             slowReadNanos += s.slowReadNanos();
         }
-        // RowId docId->row translation layer (sampled timing, extrapolated).
-        long rowIdResolvers = 0, rowIdIdentity = 0, rowIdLookups = 0, rowIdEstNanos = 0;
+        // RowId docId->row translation layer. COUNTS ONLY — the per-doc time is not code-timed
+        // (it is too hot to measure accurately); obtain its wall-clock from a CPU flamegraph.
+        long rowIdResolvers = 0, rowIdIdentity = 0, rowIdLookups = 0;
         for (RowIdStats r : rowIdRegistered) {
             rowIdResolvers++;
             if (r.isIdentity()) {
                 rowIdIdentity++;
             }
             rowIdLookups += r.lookups();
-            rowIdEstNanos += r.estimatedTotalNanos();
         }
 
         long lookups = hits + misses;
@@ -108,16 +108,16 @@ public final class QueryParquetStats {
         double setupMs = producerSetupNanos.sum() / 1_000_000.0;
         double readerOpenMs = readerOpenNanos.sum() / 1_000_000.0;
         double readerCloseMs = readerCloseNanos.sum() / 1_000_000.0;
-        double rowIdMs = rowIdEstNanos / 1_000_000.0;
-        double totalParquetMs = decodeMs + indexLoadMs + slowReadMs + setupMs + readerOpenMs + readerCloseMs + rowIdMs;
+        // Sum of the accurately-measured coarse sections only (excludes the un-timed per-doc loop).
+        double measuredParquetMs = decodeMs + indexLoadMs + slowReadMs + setupMs + readerOpenMs + readerCloseMs;
         return String.format(
             Locale.ROOT,
             "segments/columns=%d | L1/2 cache: hits=%d misses=%d (hitRate=%.2f%%) | "
                 + "L3 jumpTableLookups=%d | L4 allNullSkips=%d | "
                 + "FFM: pageDecodes=%d slowValueReads=%d slowRepeatedReads=%d | "
-                + "RowId: resolvers=%d identity=%d lookups=%d | "
-                + "timings(ms): pageDecode=%.1f pageIndexLoad=%.1f slowRead=%.1f rowIdRemap~=%.1f "
-                + "readerOpen=%.1f readerClose=%.1f producerSetup=%.1f totalParquetTime=%.1f | "
+                + "RowId: resolvers=%d identity=%d lookups=%d (time via flamegraph) | "
+                + "timings(ms): pageDecode=%.1f pageIndexLoad=%.1f slowRead=%.1f "
+                + "readerOpen=%.1f readerClose=%.1f producerSetup=%.1f measuredParquetTime=%.1f | "
                 + "values: present=%d absent=%d",
             columns,
             hits,
@@ -134,11 +134,10 @@ public final class QueryParquetStats {
             decodeMs,
             indexLoadMs,
             slowReadMs,
-            rowIdMs,
             readerOpenMs,
             readerCloseMs,
             setupMs,
-            totalParquetMs,
+            measuredParquetMs,
             present,
             absent
         );

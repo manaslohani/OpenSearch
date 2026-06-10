@@ -314,10 +314,14 @@ final class RowIdRemappingDocValues {
     }
 
     /**
-     * As {@link #resolverFrom(SortedNumericDocValues)}, but records translation activity into
-     * {@code stats} (lookup count + sampled timing). When {@code stats} is null, no instrumentation
-     * is added (the resolver is the plain hot path). Timing is sampled — see {@link RowIdStats} — so
-     * the per-document {@code System.nanoTime()} cost does not dominate on 100M+ document queries.
+     * As {@link #resolverFrom(SortedNumericDocValues)}, but records the lookup <b>count</b> into
+     * {@code stats} (and marks IDENTITY when there is no row-id field). When {@code stats} is null,
+     * no instrumentation is added (the resolver is the plain hot path).
+     *
+     * <p>Only the lookup count is recorded — never per-call timing. The per-document work is on the
+     * order of tens of nanoseconds, comparable to {@code System.nanoTime()} itself, so timing each
+     * call cannot produce a trustworthy figure; the actual wall-clock spent here is measured with a
+     * CPU flamegraph instead (see {@link RowIdStats}).
      */
     static RowIdResolver resolverFrom(SortedNumericDocValues rowIdDocValues, RowIdStats stats) {
         if (rowIdDocValues == null) {
@@ -337,8 +341,6 @@ final class RowIdRemappingDocValues {
             };
         }
         return docId -> {
-            boolean sample = (stats.lookups() & RowIdStats.SAMPLE_MASK) == 0L;
-            long startNanos = sample ? System.nanoTime() : 0L;
             if (rowIdDocValues.advanceExact(docId) == false) {
                 throw new IllegalStateException(
                     "missing __row_id__ doc value for docId=" + docId + "; cannot translate to Parquet row position"
@@ -346,9 +348,6 @@ final class RowIdRemappingDocValues {
             }
             // __row_id__ is single-valued; take the first (and only) value.
             long rowId = rowIdDocValues.nextValue();
-            if (sample) {
-                stats.recordSample(System.nanoTime() - startNanos);
-            }
             stats.recordLookup();
             return rowId;
         };
