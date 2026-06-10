@@ -231,13 +231,37 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
      * Falls back to identity when the segment has no {@code __row_id__} field.
      */
     private RowIdResolver newRowIdResolver() throws IOException {
-        SortedNumericDocValues rowId = in.getSortedNumericDocValues(DocumentInput.ROW_ID_FIELD);
-        if (queryStats == null) {
-            return RowIdRemappingDocValues.resolverFrom(rowId);
+        // The write path GUARANTEES rowId == docId in every finished segment: row ids are rewritten to
+        // sequential 0..maxDoc-1 after any sort/merge (SequentialRowIdProducer) and verified by
+        // LuceneWriter.assertRowIdsSequential. So the per-doc __row_id__ lookup is pure waste here — it
+        // re-reads a value that always equals the docId. Skip it: use the no-op IDENTITY resolver.
+        //
+        // Backed by an -ea assert that mirrors the writer's invariant; if a future write path ever
+        // produced a non-identity segment, this trips in dev/test. (Costs nothing in prod.)
+        assert assertRowIdsAreIdentity() : "non-identity __row_id__ segment reached read path; IDENTITY shortcut is unsafe here";
+        if (queryStats != null) {
+            RowIdStats rowIdStats = new RowIdStats();
+            rowIdStats.markIdentity();
+            queryStats.registerRowId(rowIdStats);
         }
-        RowIdStats rowIdStats = new RowIdStats();
-        queryStats.registerRowId(rowIdStats);
-        return RowIdRemappingDocValues.resolverFrom(rowId, rowIdStats);
+        return RowIdResolver.IDENTITY;
+    }
+
+    /** -ea-only check mirroring {@code LuceneWriter.assertRowIdsSequential}: every doc's __row_id__ == docId. */
+    private boolean assertRowIdsAreIdentity() throws IOException {
+        SortedNumericDocValues rowId = in.getSortedNumericDocValues(DocumentInput.ROW_ID_FIELD);
+        if (rowId == null) {
+            return true; // no row-id field => identity by definition
+        }
+        for (int docId = 0; docId < maxDoc(); docId++) {
+            if (rowId.advanceExact(docId) == false) {
+                return false;
+            }
+            if (rowId.nextValue() != docId) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
