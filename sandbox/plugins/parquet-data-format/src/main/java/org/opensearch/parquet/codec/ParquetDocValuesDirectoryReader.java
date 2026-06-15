@@ -75,8 +75,11 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
         try {
             super.doClose();
         } finally {
-            if (queryStats != null && queryStats.isEmpty() == false) {
-                logger.info("[PARQUET_DV_QUERY_STATS] {}", queryStats.summary());
+            // Benchmarking: the per-query [PARQUET_DV_QUERY_STATS] summary was demoted from info to
+            // trace so it is NOT emitted during raw-performance runs. Counters are still accumulated;
+            // enable -Dlogger trace on this class to see the summary again.
+            if (queryStats != null && queryStats.isEmpty() == false && logger.isTraceEnabled()) {
+                logger.trace("[PARQUET_DV_QUERY_STATS] {}", queryStats.summary());
             }
         }
     }

@@ -333,33 +333,12 @@ public final class ParquetColumnReader implements Closeable {
         if (pageIndex.isAllNulls(pageIdx)) {
             // Layer 4 — whole page is null, resolved with no decode.
             stats.allNullPageSkip();
-            if (logger.isTraceEnabled()) {
-                logger.trace(
-                    "[PARQUET_DV_TRACE] loadPageContaining: col='{}' row={} page={} is ALL-NULLS (Layer 4 skip, no decode) file={}",
-                    column,
-                    row,
-                    pageIdx,
-                    file
-                );
-            }
             cache = null; // Layer 4 — whole page is null, no decode.
             return;
         }
         // FFM — page decode crossing.
         stats.pageDecode();
-        if (logger.isTraceEnabled()) {
-            logger.trace(
-                "[PARQUET_DV_TRACE] loadPageContaining: col='{}' row={} -> decoding page={} ({} rows) [FFM crossing] file={}",
-                column,
-                row,
-                pageIdx,
-                pageIndex.numRowsOf(pageIdx),
-                file
-            );
-        }
-        long decodeStart = System.nanoTime();
         cache = decodePage(row);
-        stats.addPageDecodeNanos(System.nanoTime() - decodeStart);
     }
 
     private PageCache decodePage(long row) throws IOException {

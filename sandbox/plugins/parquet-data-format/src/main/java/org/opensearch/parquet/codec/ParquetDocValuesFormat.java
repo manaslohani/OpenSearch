@@ -8,8 +8,6 @@
 
 package org.opensearch.parquet.codec;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.apache.lucene.codecs.DocValuesConsumer;
 import org.apache.lucene.codecs.DocValuesFormat;
 import org.apache.lucene.codecs.DocValuesProducer;
@@ -40,8 +38,6 @@ public final class ParquetDocValuesFormat extends DocValuesFormat {
     /** SPI name of this format. */
     public static final String FORMAT_NAME = "ParquetDocValues";
 
-    private static final Logger logger = LogManager.getLogger(ParquetDocValuesFormat.class);
-
     private final MapperService mapperService;
 
     /** Required by Lucene SPI. The resulting instance is used only for name lookup. */
@@ -63,12 +59,6 @@ public final class ParquetDocValuesFormat extends DocValuesFormat {
 
     @Override
     public DocValuesProducer fieldsProducer(SegmentReadState state) throws IOException {
-        logger.info(
-            "[PARQUET_DV_TRACE] fieldsProducer: opening Parquet doc-values producer for segment [{}] (maxDoc={}, fields={})",
-            state.segmentInfo.name,
-            state.segmentInfo.maxDoc(),
-            state.fieldInfos.size()
-        );
         return new ParquetDocValuesProducer(state, mapperService);
     }
 }

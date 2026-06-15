@@ -143,8 +143,10 @@ public final class BufferPool implements AutoCloseable {
     public void close() {
         if (closed == false) {
             closed = true;
-            if (reuseCount + growCount > 0) {
-                logger.info("[PARQUET_DV_CACHE_STATS] {}", summary());
+            if (reuseCount + growCount > 0 && logger.isDebugEnabled()) {
+                // Benchmarking: demoted from info to debug so per-query buffer-pool stats
+                // are not emitted during raw-performance runs.
+                logger.debug("[PARQUET_DV_CACHE_STATS] {}", summary());
             }
             slots.clear();
             arena.close();
