@@ -1780,7 +1780,6 @@ public class DataFormatAwareEngine implements Indexer {
     @Override
     public Engine.SearcherSupplier acquireSearcherSupplier(Function<Engine.Searcher, Engine.Searcher> wrapper, Engine.SearcherScope scope) {
         ensureOpen();
-        logger.info("[AGG_DELEGATION_TRACE] DataFormatAwareEngine.acquireSearcherSupplier: acquiring reader for shard [{}]", shardId);
         final GatedCloseable<IndexReaderProvider.Reader> readerRef;
         try {
             readerRef = acquireReader();
@@ -1811,11 +1810,6 @@ public class DataFormatAwareEngine implements Indexer {
             // any reader that is not an OpenSearchDirectoryReader. Plugins (e.g. the Parquet DocValues
             // codec) attach their per-field DocValues view via the registered reader wrapper.
             final DirectoryReader directoryReader = OpenSearchDirectoryReader.wrap(rawDirectoryReader, shardId);
-            logger.info(
-                "[AGG_DELEGATION_TRACE] DataFormatAwareEngine.acquireSearcherSupplier: built searcher from DirectoryReader with [{}] leaves for shard [{}]",
-                directoryReader.leaves().size(),
-                shardId
-            );
             return new Engine.SearcherSupplier(wrapper) {
                 @Override
                 protected Engine.Searcher acquireSearcherInternal(String source) {
@@ -1908,21 +1902,11 @@ public class DataFormatAwareEngine implements Indexer {
                 String parquetPath = luceneFilesToParquetPath.get(leafFiles);
                 if (parquetPath != null) {
                     sr.getSegmentInfo().info.putAttribute(PARQUET_DOCVALUES_FILE_ATTRIBUTE, parquetPath);
-                    logger.info(
-                        "[PARQUET_DV_TRACE] stampParquetDocValuesFiles: leaf '{}' -> {}",
-                        sr.getSegmentInfo().info.name,
-                        parquetPath
-                    );
-                } else {
-                    logger.warn(
-                        "[PARQUET_DV_TRACE] stampParquetDocValuesFiles: no catalog match for leaf '{}' (files={}); "
-                            + "Parquet doc values unavailable for this segment",
-                        sr.getSegmentInfo().info.name,
-                        leafFiles
-                    );
                 }
-            } catch (IOException | RuntimeException e) {
-                logger.warn("[PARQUET_DV_TRACE] stampParquetDocValuesFiles: failed to bind a leaf to its Parquet file", e);
+                // A leaf with no catalog match is left unstamped (best-effort): the codec then
+                // serves no Parquet doc values for it rather than reading the wrong file.
+            } catch (IOException | RuntimeException ignored) {
+                // Best-effort binding: a leaf that cannot be resolved is left unstamped.
             }
         }
     }

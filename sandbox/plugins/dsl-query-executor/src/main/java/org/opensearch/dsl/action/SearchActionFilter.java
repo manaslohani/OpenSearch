@@ -8,9 +8,6 @@
 
 package org.opensearch.dsl.action;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import org.opensearch.action.ActionRequest;
 import org.opensearch.action.search.SearchAction;
 import org.opensearch.action.search.SearchRequest;
@@ -30,8 +27,6 @@ import org.opensearch.transport.client.node.NodeClient;
  * for execution through the Calcite pipeline. Non-search actions pass through unchanged.
  */
 public class SearchActionFilter implements ActionFilter {
-
-    private static final Logger logger = LogManager.getLogger(SearchActionFilter.class);
 
     /**
      * Controls whether this filter intercepts {@code _search} and routes it through the Calcite/DSL
@@ -84,14 +79,8 @@ public class SearchActionFilter implements ActionFilter {
         // Consider two categories: APIs that execute search vs APIs that only explain/validate.
         if (interceptEnabled && SearchAction.NAME.equals(action)) {
             SearchRequest searchRequest = (SearchRequest) request;
-            logger.info("[AGG_DELEGATION_TRACE] SearchActionFilter: intercepting _search → DSL pipeline");
             client.execute(DslExecuteAction.INSTANCE, searchRequest, (ActionListener<SearchResponse>) listener);
         } else {
-            if (SearchAction.NAME.equals(action)) {
-                logger.info(
-                    "[AGG_DELEGATION_TRACE] SearchActionFilter: _search passing through to standard QueryPhase path (intercept disabled)"
-                );
-            }
             chain.proceed(task, action, request, listener);
         }
     }

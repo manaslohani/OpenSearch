@@ -123,15 +123,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             );
         }
         this.setupNanos = System.nanoTime() - setupStart;
-        if (logger.isDebugEnabled()) {
-            logger.debug(
-                "[PARQUET_DV_TRACE] producer constructed for segment '{}': file={}, maxDoc={}, parquetRowCount={} (row counts consistent)",
-                state.segmentInfo.name,
-                parquetFile,
-                maxDoc,
-                parquetRowCount
-            );
-        }
     }
 
     /**
@@ -154,7 +145,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public NumericDocValues getNumeric(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.debug("[PARQUET_DV_TRACE] getNumeric: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.NUMERIC);
         ParquetColumnReader reader = readerFor(field, false);
         return new ParquetNumericDocValues(reader, maxDoc);
@@ -163,7 +153,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.debug("[PARQUET_DV_TRACE] getSortedNumeric: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.SORTED_NUMERIC);
         ParquetColumnReader reader = readerFor(field, true);
         return new ParquetSortedNumericDocValues(reader, maxDoc);
@@ -172,7 +161,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public BinaryDocValues getBinary(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.debug("[PARQUET_DV_TRACE] getBinary: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.BINARY);
         ParquetColumnReader reader = readerFor(field, false);
         return new ParquetBinaryDocValues(reader, maxDoc);
@@ -181,7 +169,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public SortedDocValues getSorted(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.debug("[PARQUET_DV_TRACE] getSorted: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.SORTED);
         OrdinalTable table = ordinalTableFor(field, false);
         return new ParquetSortedDocValues(table, maxDoc);
@@ -190,7 +177,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     @Override
     public SortedSetDocValues getSortedSet(FieldInfo field) throws IOException {
         ensureOpen();
-        logger.debug("[PARQUET_DV_TRACE] getSortedSet: field='{}' segment file={}", field.getName(), parquetFile);
         validate(field, DocValuesType.SORTED_SET);
         OrdinalTable table = ordinalTableFor(field, true);
         return new ParquetSortedSetDocValues(table, maxDoc);
@@ -307,14 +293,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private ParquetColumnReader readerFor(FieldInfo field, boolean repeated) throws IOException {
         ParquetColumnReader reader = columnReaders.get(field.getName());
         if (reader == null) {
-            if (logger.isDebugEnabled()) {
-                logger.debug(
-                    "[PARQUET_DV_TRACE] opening native column reader: field='{}', physicalType={}, repeated={}",
-                    field.getName(),
-                    physicalType(field),
-                    repeated
-                );
-            }
             reader = ParquetColumnReader.open(parquetFile, field.getName(), physicalType(field), repeated, bufferPool);
             reader.setQueryStats(queryStats);
             columnReaders.put(field.getName(), reader);

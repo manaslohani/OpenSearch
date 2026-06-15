@@ -8,8 +8,6 @@
 
 package org.opensearch.parquet.codec;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.DocValuesSkipIndexType;
@@ -69,8 +67,6 @@ import java.util.Map;
  * across segments.
  */
 public final class ParquetDocValuesLeafReader extends FilterLeafReader {
-
-    private static final Logger logger = LogManager.getLogger(ParquetDocValuesLeafReader.class);
 
     private final MapperService mapperService;
 
@@ -175,14 +171,6 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
         }
 
         FieldInfos mergedInfos = new FieldInfos(merged.toArray(new FieldInfo[0]));
-        if (logger.isDebugEnabled()) {
-            logger.debug(
-                "[PARQUET_DV_TRACE] ParquetDocValuesLeafReader: wrapping segment '{}' to serve {} Parquet-resident field(s): {}",
-                segmentReader.getSegmentInfo().info.name,
-                parquetFields.size(),
-                parquetFields.keySet()
-            );
-        }
         return new ParquetDocValuesLeafReader(in, mapperService, state, parquetFields, mergedInfos, queryStats);
     }
 
