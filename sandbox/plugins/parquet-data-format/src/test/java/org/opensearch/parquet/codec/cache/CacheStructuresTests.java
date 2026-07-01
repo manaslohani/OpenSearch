@@ -10,6 +10,7 @@ package org.opensearch.parquet.codec.cache;
 
 import org.opensearch.test.OpenSearchTestCase;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 
@@ -122,7 +123,10 @@ public class CacheStructuresTests extends OpenSearchTestCase {
         PageCache pc = new PageCache();
         pc.firstRow = 4;
         pc.lastRow = 9; // 6 rows
-        pc.values = new long[] { 40, 0, 60, 70, 0, 90 };
+        long[] vals = { 40, 0, 60, 70, 0, 90 };
+        MemorySegment valueSeg = Arena.ofAuto().allocate((long) vals.length * ValueLayout.JAVA_LONG.byteSize());
+        MemorySegment.copy(vals, 0, valueSeg, ValueLayout.JAVA_LONG, 0, vals.length);
+        pc.values = valueSeg;
         // present rows (relative): 0,2,3,5 -> bits 0b101101 = 45
         pc.presenceBits = new long[] { 0b101101L };
 
