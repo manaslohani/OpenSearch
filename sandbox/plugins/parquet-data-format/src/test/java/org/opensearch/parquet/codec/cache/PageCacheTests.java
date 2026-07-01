@@ -10,6 +10,10 @@ package org.opensearch.parquet.codec.cache;
 
 import org.opensearch.test.OpenSearchTestCase;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+
 /**
  * Unit tests for {@link PageCache} (task 3.4): presence bit-test correctness across word
  * boundaries and primitive value lookup by global row.
@@ -20,14 +24,15 @@ public class PageCacheTests extends OpenSearchTestCase {
         PageCache pc = new PageCache();
         pc.firstRow = 100;
         pc.lastRow = 199; // 100 rows
-        pc.values = new long[100];
+        MemorySegment values = Arena.ofAuto().allocate(100L * ValueLayout.JAVA_LONG.byteSize());
+        pc.values = values;
         // Mark even local indices present.
         pc.presenceBits = new long[(100 + 63) >> 6];
         for (int i = 0; i < 100; i++) {
             if (i % 2 == 0) {
                 pc.presenceBits[i >> 6] |= (1L << (i & 63));
             }
-            pc.values[i] = 1000 + i;
+            values.setAtIndex(ValueLayout.JAVA_LONG, i, 1000 + i);
         }
 
         assertEquals(100, pc.rowCount());
