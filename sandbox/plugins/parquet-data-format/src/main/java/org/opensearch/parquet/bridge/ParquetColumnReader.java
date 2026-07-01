@@ -353,7 +353,12 @@ public final class ParquetColumnReader implements Closeable {
 
         long valueCap = (long) rows * ValueLayout.JAVA_LONG.byteSize();
         long offsetsCap = type.isPrimitive() ? 0 : (rows + 1);
-        MemorySegment valueBuf = bufferPool.bytes("pageValue", Math.max(valueCap, 1));
+        // Per-column value slot: for primitive columns the decoded segment is retained by the
+        // PageCache and read in place (zero-copy), so it must not be shared with another column's
+        // reader (which would overwrite it on its own decode). Presence/offsets stay shared —
+        // they are copied to the heap below.
+        final String valueSlot = "pageValue:" + column;
+        MemorySegment valueBuf = bufferPool.bytes(valueSlot, Math.max(valueCap, 1));
         MemorySegment offsets = type.isPrimitive() ? MemorySegment.NULL : bufferPool.ints("pageOffsets", offsetsCap);
         MemorySegment presence = bufferPool.longs("pagePresence", presenceWords);
 
@@ -381,7 +386,7 @@ public final class ParquetColumnReader implements Closeable {
 
             valueCap = Math.max(requiredValueBytes, 1);
             offsetsCap = type.isPrimitive() ? 0 : (actualRows + 1);
-            valueBuf = bufferPool.bytes("pageValue", valueCap);
+            valueBuf = bufferPool.bytes(valueSlot, valueCap);
             offsets = type.isPrimitive() ? MemorySegment.NULL : bufferPool.ints("pageOffsets", offsetsCap);
             presence = bufferPool.longs("pagePresence", actualPresenceWords);
 
@@ -416,7 +421,11 @@ public final class ParquetColumnReader implements Closeable {
             .toArray(ValueLayout.JAVA_LONG);
 
         if (type.isPrimitive()) {
-            pc.values = valueBuf.asSlice(0, (long) pageRows * ValueLayout.JAVA_LONG.byteSize()).toArray(ValueLayout.JAVA_LONG);
+            // Zero-copy: retain the off-heap segment (per-column slot) sliced to the page's
+            // longs; PageCache.valueAt reads it in place with no heap copy. Safe because this
+            // slot is not shared across columns and this column's next decode won't run until
+            // this cache is replaced.
+            pc.values = valueBuf.asSlice(0, (long) pageRows * ValueLayout.JAVA_LONG.byteSize());
         } else {
             pc.byteBuf = valueLen > 0 ? valueBuf.asSlice(0, valueLen).toArray(ValueLayout.JAVA_BYTE) : new byte[0];
             pc.byteOffsets = offsets.asSlice(0, (long) (pageRows + 1) * ValueLayout.JAVA_INT.byteSize()).toArray(ValueLayout.JAVA_INT);
