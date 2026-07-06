@@ -237,6 +237,11 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
                 allNullSkips,
                 decodes
             );
+            // Snapshot of the codec's cross-query liquid cache (hit/miss + resident entries). Logged
+            // natively at [PARQUET_DV_LIQUID_STATS]; a cheap no-op when the liquid cache is disabled.
+            // Placed here (once per producer close) so the O(entries) LiquidCache::stats() call never
+            // lands on the per-page decode path.
+            RustBridge.liquidCacheLogStats();
         }
         closed = true;
         IOException first = null;

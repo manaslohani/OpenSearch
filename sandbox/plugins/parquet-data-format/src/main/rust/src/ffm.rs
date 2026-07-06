@@ -1222,6 +1222,14 @@ pub unsafe extern "C" fn parquet_liquid_cache_set_enabled(enabled: i32, max_memo
     crate::liquid_page_cache::set_enabled(enabled != 0, bytes);
 }
 
+/// Log a snapshot of the codec liquid cache (cumulative hit/miss counters + liquid resident-entry
+/// stats). Called by Java once per segment-producer close so the O(entries) `LiquidCache::stats()`
+/// call never lands on the per-page hot path. Cheap no-op counters when the cache is disabled.
+#[no_mangle]
+pub unsafe extern "C" fn parquet_liquid_cache_log_stats() {
+    crate::liquid_page_cache::log_stats();
+}
+
 /// Slow-path single-value read at `row`.
 ///
 /// On success writes:

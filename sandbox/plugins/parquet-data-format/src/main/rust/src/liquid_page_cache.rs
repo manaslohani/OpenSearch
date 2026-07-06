@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 use std::future::IntoFuture;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use arrow::array::{Array, ArrayRef, Int64Array};
@@ -57,6 +57,15 @@ static MAX_MEMORY_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// Codec-local file path → small integer id registry, so entries carry file identity without
 /// depending on DataFusion's file numbering.
 static FILE_IDS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+
+/// Cumulative process-wide hit/miss counters for the cache. Cheap O(1) relaxed atomics bumped on
+/// the per-page path. These are the observability signal — liquid's own `cache_hit`/`cache_miss`
+/// stats are only incremented by its DataFusion reader wrapper, not the core `get`/`insert` path
+/// the codec uses, so they always read 0 on this instance. A snapshot is logged per query via the
+/// `parquet_liquid_cache_stats` FFM entry point (see `ffm.rs`), which is where the O(entries)
+/// `LiquidCache::stats()` call lives — never on the hot path.
+static HITS: AtomicU64 = AtomicU64::new(0);
+static MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// Enable/disable the cache and set the memory budget. Called by Java at plugin init when the
 /// `parquet_liquid_cache` feature flag is on. A `max_memory_bytes` of 0 leaves the liquid default.
@@ -109,10 +118,26 @@ pub fn entry_id(file_id: u32, column_id: u32, page_idx: u32) -> EntryID {
 }
 
 /// Look up a cached decoded page. Returns `(longs, presence)` in the exact form the decode arms
-/// produce (`longs[i]` valid iff `presence[i]`), or `None` on a miss.
+/// produce (`longs[i]` valid iff `presence[i]`), or `None` on a miss. Bumps the cumulative
+/// hit/miss counters so a `None` here (miss → caller decodes + backfills) and a `Some` (hit →
+/// caller skips decode) are both accounted for in one place.
 pub fn get_page(eid: EntryID) -> Option<(Vec<i64>, Vec<bool>)> {
-    let array: ArrayRef = runtime().block_on(cache().get(&eid).read())?;
-    let int_array = array.as_any().downcast_ref::<Int64Array>()?;
+    let array: ArrayRef = match runtime().block_on(cache().get(&eid).read()) {
+        Some(a) => a,
+        None => {
+            MISSES.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
+    // A downcast failure is treated as a miss: the caller will re-decode this page.
+    let int_array = match array.as_any().downcast_ref::<Int64Array>() {
+        Some(a) => a,
+        None => {
+            MISSES.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
+    HITS.fetch_add(1, Ordering::Relaxed);
     let len = int_array.len();
     let mut longs = Vec::with_capacity(len);
     let mut presence = Vec::with_capacity(len);
@@ -141,4 +166,38 @@ pub fn put_page(eid: EntryID, longs: &[i64], presence: &[bool]) {
     // Best-effort: a CacheFull error just means this page is not cached this time.
     // `insert`/`get` return builder types that implement `IntoFuture`, so convert before block_on.
     let _ = runtime().block_on(cache().insert(eid, array_ref).into_future());
+}
+
+/// Log a snapshot of the codec liquid cache: the cumulative O(1) hit/miss counters plus liquid's
+/// own resident-entry stats. Intended to be called at most once per query (segment producer close),
+/// NOT on the per-page path — `LiquidCache::stats()` iterates every resident entry (O(entries)),
+/// so calling it per page would turn a page lookup into a full-cache scan. A no-op when the cache
+/// was never enabled/built (avoids forcing the lazy `cache()` build just to log zeros).
+pub fn log_stats() {
+    let hits = HITS.load(Ordering::Relaxed);
+    let misses = MISSES.load(Ordering::Relaxed);
+    let lookups = hits + misses;
+    let hit_rate = if lookups == 0 { 0.0 } else { hits as f64 / lookups as f64 * 100.0 };
+
+    // Only touch LiquidCache::stats() (O(entries)) if the cache was actually built; if it was never
+    // consulted there is nothing resident and no reason to force the OnceLock init.
+    if let Some(cache) = CACHE.get() {
+        let s = cache.stats();
+        crate::log_info!(
+            "[PARQUET_DV_LIQUID_STATS] hits={} misses={} (hitRate={:.2}%) | entries={} mem={}/{} bytes",
+            hits,
+            misses,
+            hit_rate,
+            s.total_entries,
+            s.memory_usage_bytes,
+            s.max_memory_bytes,
+        );
+    } else {
+        crate::log_info!(
+            "[PARQUET_DV_LIQUID_STATS] hits={} misses={} (hitRate={:.2}%) | cache not built",
+            hits,
+            misses,
+            hit_rate,
+        );
+    }
 }

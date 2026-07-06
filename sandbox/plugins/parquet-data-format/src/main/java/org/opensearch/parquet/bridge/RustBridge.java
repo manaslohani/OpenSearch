@@ -56,6 +56,7 @@ public class RustBridge {
     private static final MethodHandle CLOSE_COLUMN_READER;
     private static final MethodHandle OPEN_COLUMN_READER_COUNT;
     private static final MethodHandle LIQUID_CACHE_SET_ENABLED;
+    private static final MethodHandle LIQUID_CACHE_LOG_STATS;
     private static final MethodHandle READ_VALUE_AT_ROW;
     private static final MethodHandle READ_REPEATED_AT_ROW;
     private static final MethodHandle GET_COLUMN_NUM_PAGES;
@@ -322,6 +323,10 @@ public class RustBridge {
         LIQUID_CACHE_SET_ENABLED = linker.downcallHandle(
             lib.find("parquet_liquid_cache_set_enabled").orElseThrow(),
             FunctionDescriptor.ofVoid(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG)
+        );
+        LIQUID_CACHE_LOG_STATS = linker.downcallHandle(
+            lib.find("parquet_liquid_cache_log_stats").orElseThrow(),
+            FunctionDescriptor.ofVoid()
         );
         READ_VALUE_AT_ROW = linker.downcallHandle(
             lib.find("parquet_read_value_at_row").orElseThrow(),
@@ -865,6 +870,17 @@ public class RustBridge {
      */
     public static void liquidCacheSetEnabled(boolean enabled, long maxMemoryBytes) {
         NativeCall.invokeVoid(LIQUID_CACHE_SET_ENABLED, enabled ? 1 : 0, maxMemoryBytes);
+    }
+
+    /**
+     * Logs a snapshot of the codec liquid cache (cumulative hit/miss counters + liquid resident-entry
+     * stats) at {@code [PARQUET_DV_LIQUID_STATS]}. Intended to be called at most once per query
+     * (segment producer close), never on the per-page path: the underlying
+     * {@code LiquidCache::stats()} iterates every resident entry. A cheap no-op when the cache is
+     * disabled.
+     */
+    public static void liquidCacheLogStats() {
+        NativeCall.invokeVoid(LIQUID_CACHE_LOG_STATS);
     }
 
     /**
