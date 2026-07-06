@@ -117,6 +117,31 @@ pub fn entry_id(file_id: u32, column_id: u32, page_idx: u32) -> EntryID {
     EntryID::from(v)
 }
 
+/// How often to emit a throttled hit/miss log line (every Nth event) at INFO. The first event is
+/// always logged so a cache hit is visible the instant it first happens, without waiting for a
+/// producer-close summary or a DEBUG logger. Chosen large enough not to spam a real workload.
+const LOG_EVERY: u64 = 1000;
+
+/// Emit an INFO line on the first hit and every `LOG_EVERY`th hit thereafter. `n` is the running
+/// hit count (post-increment). INFO is the codec's default native level, so this appears in the
+/// OpenSearch log with no cluster-settings change — the reliable proof that a query served a page
+/// from liquid rather than re-decoding it.
+#[inline]
+fn log_hit(n: u64) {
+    if n == 1 || n % LOG_EVERY == 0 {
+        crate::log_info!("[PARQUET_DV_LIQUID] HIT (served from cache, decode skipped) — total hits={}", n);
+    }
+}
+
+/// Emit an INFO line on the first miss and every `LOG_EVERY`th miss thereafter. `n` is the running
+/// miss count (post-increment).
+#[inline]
+fn log_miss(n: u64) {
+    if n == 1 || n % LOG_EVERY == 0 {
+        crate::log_info!("[PARQUET_DV_LIQUID] MISS (decoded + backfilled) — total misses={}", n);
+    }
+}
+
 /// Look up a cached decoded page. Returns `(longs, presence)` in the exact form the decode arms
 /// produce (`longs[i]` valid iff `presence[i]`), or `None` on a miss. Bumps the cumulative
 /// hit/miss counters so a `None` here (miss → caller decodes + backfills) and a `Some` (hit →
@@ -125,7 +150,7 @@ pub fn get_page(eid: EntryID) -> Option<(Vec<i64>, Vec<bool>)> {
     let array: ArrayRef = match runtime().block_on(cache().get(&eid).read()) {
         Some(a) => a,
         None => {
-            MISSES.fetch_add(1, Ordering::Relaxed);
+            log_miss(MISSES.fetch_add(1, Ordering::Relaxed) + 1);
             return None;
         }
     };
@@ -133,11 +158,11 @@ pub fn get_page(eid: EntryID) -> Option<(Vec<i64>, Vec<bool>)> {
     let int_array = match array.as_any().downcast_ref::<Int64Array>() {
         Some(a) => a,
         None => {
-            MISSES.fetch_add(1, Ordering::Relaxed);
+            log_miss(MISSES.fetch_add(1, Ordering::Relaxed) + 1);
             return None;
         }
     };
-    HITS.fetch_add(1, Ordering::Relaxed);
+    log_hit(HITS.fetch_add(1, Ordering::Relaxed) + 1);
     let len = int_array.len();
     let mut longs = Vec::with_capacity(len);
     let mut presence = Vec::with_capacity(len);
