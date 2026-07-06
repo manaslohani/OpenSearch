@@ -261,7 +261,11 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     public NumericDocValues getNumericDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null && fi.getDocValuesType() == DocValuesType.NUMERIC) {
-            return RowIdRemappingDocValues.numeric(producer().getNumeric(fi), newRowIdResolver(), maxDoc());
+            RowIdResolver resolver = newRowIdResolver();
+            NumericDocValues numeric = producer().getNumeric(fi);
+            // IDENTITY (the guaranteed case — see newRowIdResolver) means docId == Parquet row, so the
+            // remap wrapper is pure indirection: return the delegate, already in docId space, directly.
+            return resolver == RowIdResolver.IDENTITY ? numeric : RowIdRemappingDocValues.numeric(numeric, resolver, maxDoc());
         }
         return in.getNumericDocValues(field);
     }
@@ -288,7 +292,10 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
                 ? fi
                 : newDocValuesFieldInfo(field, fi.number, DocValuesType.NUMERIC);
             NumericDocValues numeric = producer().getNumeric(asNumeric);
-            NumericDocValues remapped = RowIdRemappingDocValues.numeric(numeric, newRowIdResolver(), maxDoc());
+            RowIdResolver resolver = newRowIdResolver();
+            NumericDocValues remapped = resolver == RowIdResolver.IDENTITY
+                ? numeric
+                : RowIdRemappingDocValues.numeric(numeric, resolver, maxDoc());
             return DocValues.singleton(remapped);
         }
         return in.getSortedNumericDocValues(field);
@@ -298,7 +305,9 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     public BinaryDocValues getBinaryDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null && fi.getDocValuesType() == DocValuesType.BINARY) {
-            return RowIdRemappingDocValues.binary(producer().getBinary(fi), newRowIdResolver(), maxDoc());
+            RowIdResolver resolver = newRowIdResolver();
+            BinaryDocValues binary = producer().getBinary(fi);
+            return resolver == RowIdResolver.IDENTITY ? binary : RowIdRemappingDocValues.binary(binary, resolver, maxDoc());
         }
         return in.getBinaryDocValues(field);
     }
@@ -307,7 +316,9 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     public SortedDocValues getSortedDocValues(String field) throws IOException {
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null && fi.getDocValuesType() == DocValuesType.SORTED) {
-            return RowIdRemappingDocValues.sorted(producer().getSorted(fi), newRowIdResolver(), maxDoc());
+            RowIdResolver resolver = newRowIdResolver();
+            SortedDocValues sorted = producer().getSorted(fi);
+            return resolver == RowIdResolver.IDENTITY ? sorted : RowIdRemappingDocValues.sorted(sorted, resolver, maxDoc());
         }
         return in.getSortedDocValues(field);
     }
@@ -330,7 +341,10 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
                 ? fi
                 : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED);
             SortedDocValues sorted = producer().getSorted(asSorted);
-            SortedDocValues remapped = RowIdRemappingDocValues.sorted(sorted, newRowIdResolver(), maxDoc());
+            RowIdResolver resolver = newRowIdResolver();
+            SortedDocValues remapped = resolver == RowIdResolver.IDENTITY
+                ? sorted
+                : RowIdRemappingDocValues.sorted(sorted, resolver, maxDoc());
             return DocValues.singleton(remapped);
         }
         return in.getSortedSetDocValues(field);
