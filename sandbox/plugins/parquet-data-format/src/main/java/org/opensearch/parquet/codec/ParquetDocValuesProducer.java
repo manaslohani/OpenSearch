@@ -242,6 +242,9 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             // Placed here (once per producer close) so the O(entries) LiquidCache::stats() call never
             // lands on the per-page decode path.
             RustBridge.liquidCacheLogStats();
+            // Per-phase native decode timing breakdown, logged at [PARQUET_DV_DECODE_PROFILE] and
+            // reset. Same placement rationale: once per producer close, off the per-page path.
+            RustBridge.decodeProfileDump();
         }
         closed = true;
         IOException first = null;

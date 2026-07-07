@@ -15,6 +15,7 @@ mod tests;
 pub mod writer;
 pub mod ffm;
 pub mod liquid_page_cache;
+pub mod decode_profile;
 pub mod memory;
 pub mod native_settings;
 pub mod field_config;

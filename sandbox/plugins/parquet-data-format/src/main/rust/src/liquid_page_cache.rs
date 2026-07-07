@@ -147,7 +147,11 @@ fn log_miss(n: u64) {
 /// hit/miss counters so a `None` here (miss → caller decodes + backfills) and a `Some` (hit →
 /// caller skips decode) are both accounted for in one place.
 pub fn get_page(eid: EntryID) -> Option<(Vec<i64>, Vec<bool>)> {
-    let array: ArrayRef = match runtime().block_on(cache().get(&eid).read()) {
+    // Phase 1: liquid index lookup + async read (the block_on).
+    let __read_start = std::time::Instant::now();
+    let read_result = runtime().block_on(cache().get(&eid).read());
+    crate::decode_profile::LIQUID_GET_READ.add_elapsed(__read_start);
+    let array: ArrayRef = match read_result {
         Some(a) => a,
         None => {
             log_miss(MISSES.fetch_add(1, Ordering::Relaxed) + 1);
@@ -163,6 +167,8 @@ pub fn get_page(eid: EntryID) -> Option<(Vec<i64>, Vec<bool>)> {
         }
     };
     log_hit(HITS.fetch_add(1, Ordering::Relaxed) + 1);
+    // Phase 2: the Arrow -> (Vec<i64>, Vec<bool>) rebuild loop (the transcode).
+    let __rebuild_start = std::time::Instant::now();
     let len = int_array.len();
     let mut longs = Vec::with_capacity(len);
     let mut presence = Vec::with_capacity(len);
@@ -175,6 +181,7 @@ pub fn get_page(eid: EntryID) -> Option<(Vec<i64>, Vec<bool>)> {
             presence.push(true);
         }
     }
+    crate::decode_profile::LIQUID_GET_REBUILD.add_elapsed(__rebuild_start);
     Some((longs, presence))
 }
 
@@ -182,15 +189,21 @@ pub fn get_page(eid: EntryID) -> Option<(Vec<i64>, Vec<bool>)> {
 /// null rows are stored as Arrow nulls so a later `get_page` reconstructs presence exactly.
 pub fn put_page(eid: EntryID, longs: &[i64], presence: &[bool]) {
     debug_assert_eq!(longs.len(), presence.len());
+    // Phase 1: build the Arrow Int64Array from raw longs + presence (the store-side transcode).
+    let __build_start = std::time::Instant::now();
     let array: Int64Array = longs
         .iter()
         .zip(presence.iter())
         .map(|(&v, &present)| if present { Some(v) } else { None })
         .collect();
     let array_ref: ArrayRef = Arc::new(array);
+    crate::decode_profile::LIQUID_PUT_BUILD.add_elapsed(__build_start);
+    // Phase 2: liquid index insert + async (the block_on).
     // Best-effort: a CacheFull error just means this page is not cached this time.
     // `insert`/`get` return builder types that implement `IntoFuture`, so convert before block_on.
+    let __insert_start = std::time::Instant::now();
     let _ = runtime().block_on(cache().insert(eid, array_ref).into_future());
+    crate::decode_profile::LIQUID_PUT_INSERT.add_elapsed(__insert_start);
 }
 
 /// Log a snapshot of the codec liquid cache: the cumulative O(1) hit/miss counters plus liquid's

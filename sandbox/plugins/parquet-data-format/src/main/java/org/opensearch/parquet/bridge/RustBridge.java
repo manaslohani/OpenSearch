@@ -57,6 +57,7 @@ public class RustBridge {
     private static final MethodHandle OPEN_COLUMN_READER_COUNT;
     private static final MethodHandle LIQUID_CACHE_SET_ENABLED;
     private static final MethodHandle LIQUID_CACHE_LOG_STATS;
+    private static final MethodHandle DECODE_PROFILE_DUMP;
     private static final MethodHandle READ_VALUE_AT_ROW;
     private static final MethodHandle READ_REPEATED_AT_ROW;
     private static final MethodHandle GET_COLUMN_NUM_PAGES;
@@ -326,6 +327,10 @@ public class RustBridge {
         );
         LIQUID_CACHE_LOG_STATS = linker.downcallHandle(
             lib.find("parquet_liquid_cache_log_stats").orElseThrow(),
+            FunctionDescriptor.ofVoid()
+        );
+        DECODE_PROFILE_DUMP = linker.downcallHandle(
+            lib.find("parquet_decode_profile_dump").orElseThrow(),
             FunctionDescriptor.ofVoid()
         );
         READ_VALUE_AT_ROW = linker.downcallHandle(
@@ -881,6 +886,16 @@ public class RustBridge {
      */
     public static void liquidCacheLogStats() {
         NativeCall.invokeVoid(LIQUID_CACHE_LOG_STATS);
+    }
+
+    /**
+     * Logs the per-phase decode timing breakdown at {@code [PARQUET_DV_DECODE_PROFILE]} (row-group
+     * setup, skip, read_records, presence, expand, write-out, and the liquid get/put phases) and
+     * resets the counters. Intended to be called once per query (segment producer close). The
+     * per-phase timers sit on the per-page path; this dump is per-query, so its cost is negligible.
+     */
+    public static void decodeProfileDump() {
+        NativeCall.invokeVoid(DECODE_PROFILE_DUMP);
     }
 
     /**

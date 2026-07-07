@@ -1230,6 +1230,15 @@ pub unsafe extern "C" fn parquet_liquid_cache_log_stats() {
     crate::liquid_page_cache::log_stats();
 }
 
+/// Log the per-phase decode timing breakdown (`[PARQUET_DV_DECODE_PROFILE]`) and reset the
+/// counters. Called by Java once per segment-producer close, mirroring the liquid stats dump. The
+/// per-phase timers themselves sit on the per-page path; this dump is per-query, so its cost is
+/// negligible.
+#[no_mangle]
+pub unsafe extern "C" fn parquet_decode_profile_dump() {
+    crate::decode_profile::dump_and_reset();
+}
+
 /// Slow-path single-value read at `row`.
 ///
 /// On success writes:
@@ -1626,7 +1635,9 @@ fn decode_page_records<T: ParquetDataType>(
     max_def_level: i16,
 ) -> Result<(Vec<bool>, Vec<T::T>), String> {
     if skip > 0 {
+        let __skip_start = std::time::Instant::now();
         let skipped = r.skip_records(skip).map_err(|e| e.to_string())?;
+        crate::decode_profile::SKIP.add_elapsed(__skip_start);
         if skipped < skip {
             return Err(format!(
                 "page decode: requested skip of {} records but only {} available",
@@ -1637,9 +1648,11 @@ fn decode_page_records<T: ParquetDataType>(
 
     let mut def_levels: Vec<i16> = Vec::with_capacity(num_rows);
     let mut values: Vec<T::T> = Vec::with_capacity(num_rows);
+    let __read_start = std::time::Instant::now();
     let (records_read, _values_read, _levels_read) = r
         .read_records(num_rows, Some(&mut def_levels), None, &mut values)
         .map_err(|e| e.to_string())?;
+    crate::decode_profile::READ_RECORDS.add_elapsed(__read_start);
     if records_read < num_rows {
         return Err(format!(
             "page decode: expected {} records but read {}",
@@ -1649,11 +1662,13 @@ fn decode_page_records<T: ParquetDataType>(
 
     // Build the per-row presence vector. For required columns `read_records`
     // ignores the def-level buffer and every row is present.
+    let __presence_start = std::time::Instant::now();
     let presence = if max_def_level == 0 {
         vec![true; num_rows]
     } else {
         def_levels.iter().take(num_rows).map(|d| *d == max_def_level).collect()
     };
+    crate::decode_profile::PRESENCE.add_elapsed(__presence_start);
     Ok((presence, values))
 }
 
@@ -1774,8 +1789,12 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
         }
     }
 
+    // Time row-group + column-reader setup (miss path only). `col` borrows from `rg`, so we can't
+    // wrap this in a closure that returns both — time it with an explicit Instant instead.
+    let __setup_start = std::time::Instant::now();
     let rg = state.reader.get_row_group(rg_idx).map_err(|e| e.to_string())?;
     let col = rg.get_column_reader(state.leaf_idx).map_err(|e| e.to_string())?;
+    crate::decode_profile::SETUP.add_elapsed(__setup_start);
     let skip = local_first as usize;
 
     // Decode the page into per-row presence + raw-bit values (primitives) or a
@@ -1863,6 +1882,7 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
 /// Expands dense non-null primitive values into a per-row `i64` slot vector
 /// (null rows hold 0), applying `to_bits` to each present value.
 fn expand_primitive<T: Copy>(presence: &[bool], dense: &[T], to_bits: impl Fn(T) -> i64) -> Vec<i64> {
+    let __expand_start = std::time::Instant::now();
     let mut out = Vec::with_capacity(presence.len());
     let mut di = 0usize;
     for &present in presence {
@@ -1873,6 +1893,7 @@ fn expand_primitive<T: Copy>(presence: &[bool], dense: &[T], to_bits: impl Fn(T)
             out.push(0);
         }
     }
+    crate::decode_profile::EXPAND.add_elapsed(__expand_start);
     out
 }
 
@@ -1940,6 +1961,8 @@ unsafe fn write_primitive_page(
     // a MemorySegment using native byte order). Copy raw bytes rather than
     // storing through a *mut i64 — out_value_buf is a u8 buffer with no
     // guaranteed 8-byte alignment, so an aligned i64 store would be UB.
+    // Time the actual copy-out work (the success path; the overflow early-return above does no copy).
+    let __write_start = std::time::Instant::now();
     if !longs.is_empty() {
         std::ptr::copy_nonoverlapping(
             longs.as_ptr() as *const u8,
@@ -1948,6 +1971,7 @@ unsafe fn write_primitive_page(
         );
     }
     write_presence_bitset(presence, out_presence_bitset, out_presence_bits_cap);
+    crate::decode_profile::WRITE_OUT.add_elapsed(__write_start);
     Ok(RC_OK)
 }
 
