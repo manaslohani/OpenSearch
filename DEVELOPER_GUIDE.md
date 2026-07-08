@@ -682,3 +682,75 @@ If you still see a failing test that is not part of the post merge actions, plea
 ### Gradle Check Metrics Dashboard
 
 To get the comprehensive insights and analysis of the Gradle Check test failures, visit the [OpenSearch Gradle Check Metrics Dashboard](https://metrics.opensearch.org/_dashboards/app/dashboards#/view/e5e64d40-ed31-11ee-be99-69d1dbc75083). This dashboard is part of the [OpenSearch Metrics Project](https://github.com/opensearch-project/opensearch-metrics) initiative. The dashboard contains multiple data points that can help investigate and resolve flaky failures. Additionally, this dashboard can be used to drill down, slice, and dice the data using multiple supported filters, which further aids in troubleshooting and resolving issues.
+
+
+## Running the Parquet DocValues Codec (with / without Liquid Cache)
+
+### Prerequisites (toolchain)
+- **JDK 25** 
+- **protoc 3.x** on `PATH`
+- **Linux only** — Liquid is gated `#[cfg(target_os = "linux")]`; build & run on EC2/linux, not Mac.
+- **Rust / cargo ≥ 1.85**
+
+### Build (one-time; ~15–20 min for the native lib)
+```bash
+git checkout bench-codec-liquid-zerocopy   # or a specific commit (see below)
+
+# 1. Native lib (Liquid + zero-copy are Rust)
+cd sandbox/libs/dataformat-native/rust
+cargo build --release -p opensearch-native-lib -j "$(nproc)"
+# → target/release/libopensearch_native.so
+
+# 2. Distro + the ABI-coupled plugins (from repo root)
+cd ~/OpenSearch   # back to repo root
+export JAVA_HOME=<your JDK 25 path>
+./gradlew localDistro -x test -x javadoc -x missingJavadoc
+
+# 3. Deploy fresh core lib + plugins into your run dir (e.g. ~/3.8.0-ARCHIVE)
+ARCHIVE=~/3.8.0-ARCHIVE
+rsync -a build/distribution/local/opensearch-3.8.0-SNAPSHOT/lib/ "$ARCHIVE/lib/"
+~/build.sh plugin parquet-data-format
+~/build.sh plugin analytics-backend-datafusion
+```
+
+Run — LIQUID ON
+
+```
+
+CFG=~/3.8.0-ARCHIVE/config/opensearch.yml
+grep -v -iE "liquid_cache" "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+grep -q "pluggable.dataformat.enabled" "$CFG" || echo "opensearch.experimental.feature.pluggable.dataformat.enabled: true" >> "$CFG"
+cat >> "$CFG" <<'YML'
+parquet.liquid_cache.enabled: true
+datafusion.liquid_cache.enabled: true
+datafusion.liquid_cache.cache_dir: /tmp/opensearch/liquid_cache
+YML
+mkdir -p /tmp/opensearch/liquid_cache
+
+pkill -f 'org.opensearch.bootstrap.OpenSearch'; sleep 6
+TMPDIR=/home/ec2-user/liquid-tmp OPENSEARCH_TMPDIR=/home/ec2-user/liquid-tmp \
+  nohup ~/3.8.0-ARCHIVE/bin/opensearch > ~/os.log 2>&1 &
+until curl -s localhost:9200/_cluster/health | grep -q '"status":"green"'; do sleep 5; echo waiting; done; echo GREEN
+
+# verify liquid is serving (HIT count climbs after a query)
+curl -s "localhost:9200/clickbench/_search?request_cache=false" -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"a":{"avg":{"field":"UserID"}}}}' >/dev/null
+grep -c "PARQUET_DV_LIQUID.*HIT" ~/3.8.0-ARCHIVE/logs/doc-values-codec.log
+```
+
+Run — LIQUID OFF (plain codec)
+
+```
+CFG=~/3.8.0-ARCHIVE/config/opensearch.yml
+grep -v -iE "liquid_cache" "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+grep -q "pluggable.dataformat.enabled" "$CFG" || echo "opensearch.experimental.feature.pluggable.dataformat.enabled: true" >> "$CFG"
+
+pkill -f 'org.opensearch.bootstrap.OpenSearch'; sleep 6
+TMPDIR=/home/ec2-user/liquid-tmp nohup ~/3.8.0-ARCHIVE/bin/opensearch > ~/os.log 2>&1 &
+until curl -s localhost:9200/_cluster/health | grep -q '"status":"green"'; do sleep 5; echo waiting; done; echo GREEN
+
+# verify OFF: HIT count stays flat after a query
+curl -s "localhost:9200/clickbench/_search?request_cache=false" -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"a":{"avg":{"field":"UserID"}}}}' >/dev/null
+grep -c "PARQUET_DV_LIQUID.*HIT" ~/3.8.0-ARCHIVE/logs/doc-values-codec.log
+```
