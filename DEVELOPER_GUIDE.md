@@ -728,6 +728,8 @@ YML
 mkdir -p /tmp/opensearch/liquid_cache
 
 pkill -f 'org.opensearch.bootstrap.OpenSearch'; sleep 6
+# Temporary hack (Liquid ON):** must launch with `TMPDIR` on a real disk (`TMPDIR=/home/ec2-user/liquid-tmp`), not tmpfs — else Liquid's t4 store mmap fails and panics the codec. # Workaround until the codec mounts its own on-disk cache dir.
+
 TMPDIR=/home/ec2-user/liquid-tmp OPENSEARCH_TMPDIR=/home/ec2-user/liquid-tmp \
   nohup ~/3.8.0-ARCHIVE/bin/opensearch > ~/os.log 2>&1 &
 until curl -s localhost:9200/_cluster/health | grep -q '"status":"green"'; do sleep 5; echo waiting; done; echo GREEN
