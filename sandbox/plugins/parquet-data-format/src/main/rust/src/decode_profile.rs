@@ -12,7 +12,10 @@
 //! "uber-level" frame, so it can't tell how much of a query's native time is row-group setup vs
 //! the actual Parquet decode vs the Arrow round-trip in the liquid cache. This module records
 //! wall-clock nanoseconds (and a call count) per phase into process-global atomics, and dumps a
-//! per-query summary via `dump_and_reset` (wired to the FFM entry point called at producer close).
+//! summary via `dump_and_reset` (exposed through the `parquet_decode_profile_dump` FFM entry point,
+//! triggered on demand by toggling the `parquet.decode_profile.dump` node setting). Each dump reads
+//! and resets the counters, so the reported figures are the delta since the previous dump — clear
+//! (dump), run one query, dump again to read that query's per-phase breakdown.
 //!
 //! All instrumented phases are on the **per-page** path (~one call per ~20k-row page, i.e. a few
 //! thousand times for a 100M-row scan), so the `Instant::now()` overhead is negligible against the
@@ -40,8 +43,8 @@ impl Phase {
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Add the time elapsed since `start` as one call. For call sites where a borrow makes the
-    /// `timed()` closure form impossible (e.g. a value borrowed from another in the timed block).
+    /// Record the time elapsed since `start` as one call: bump the nanos sum and the call count.
+    /// Callers bracket the timed region with `let s = Instant::now(); ...; phase.add_elapsed(s);`.
     #[inline]
     pub fn add_elapsed(&self, start: Instant) {
         self.add(start.elapsed().as_nanos() as u64);
@@ -93,16 +96,6 @@ fn all() -> [&'static Phase; 10] {
         &LIQUID_PUT_BUILD,
         &LIQUID_PUT_INSERT,
     ]
-}
-
-/// Run `f`, adding its elapsed time to `phase`. The timer is only taken on the per-page path, so
-/// the `Instant::now()` cost is negligible.
-#[inline]
-pub fn timed<T>(phase: &Phase, f: impl FnOnce() -> T) -> T {
-    let start = Instant::now();
-    let result = f();
-    phase.add(start.elapsed().as_nanos() as u64);
-    result
 }
 
 /// Log a `[PARQUET_DV_DECODE_PROFILE]` line per phase (total ms + call count + avg µs) and reset

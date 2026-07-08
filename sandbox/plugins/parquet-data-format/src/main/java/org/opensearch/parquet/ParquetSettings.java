@@ -239,6 +239,20 @@ public final class ParquetSettings {
     );
 
     /**
+     * Profiling trigger: toggling this to {@code true} logs the native per-phase decode timing
+     * breakdown ({@code [PARQUET_DV_DECODE_PROFILE]}) and resets the counters. Dynamic so it can be
+     * flipped at runtime via {@code _cluster/settings}; the update consumer runs on the cluster-state
+     * thread (never a hot path). Read-and-reset semantics: dump to clear, run one query, dump to read
+     * that query's breakdown.
+     */
+    public static final Setting<Boolean> DECODE_PROFILE_DUMP = Setting.boolSetting(
+        "parquet.decode_profile.dump",
+        false,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /**
      * Minimum number of variable-width (string/binary) non-sort columns required to activate
      * deferred data loading during merge. Below this threshold, all columns are decoded eagerly
      * (original behavior). Set to 0 to always defer; set very high to disable deferral.
@@ -872,6 +886,7 @@ public final class ParquetSettings {
             MERGE_IO_THREADS,
             LIQUID_CACHE_ENABLED,
             LIQUID_CACHE_MAX_BYTES,
+            DECODE_PROFILE_DUMP,
             MERGE_DEFERRED_COLUMN_THRESHOLD,
             WRITE_POOL_MIN,
             WRITE_POOL_MAX,

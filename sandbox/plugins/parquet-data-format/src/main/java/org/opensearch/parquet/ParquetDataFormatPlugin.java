@@ -180,6 +180,11 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin,
                 ParquetSettings.MERGE_POOL_MIN,
                 newMin -> nativeAllocator.setPoolMin(ParquetSettings.POOL_MERGE, newMin)
             );
+            cs.addSettingsUpdateConsumer(ParquetSettings.DECODE_PROFILE_DUMP, dump -> {
+                if (dump) {
+                    RustBridge.decodeProfileDump();
+                }
+            });
 
             nativeAllocator.addStatsRefresher(() -> {
                 long[] s = RustBridge.getPoolStats();
@@ -191,6 +196,11 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin,
             ClusterSettings cs = clusterService.getClusterSettings();
             cs.addSettingsUpdateConsumer(ParquetSettings.WRITE_POOL_MAX, newMax -> RustBridge.setWritePoolLimit(newMax));
             cs.addSettingsUpdateConsumer(ParquetSettings.MERGE_POOL_MAX, newMax -> RustBridge.setMergePoolLimit(newMax));
+            cs.addSettingsUpdateConsumer(ParquetSettings.DECODE_PROFILE_DUMP, dump -> {
+                if (dump) {
+                    RustBridge.decodeProfileDump();
+                }
+            });
         }
 
         return Collections.emptyList();
