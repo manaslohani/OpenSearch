@@ -43,31 +43,41 @@ public final class ParquetNumericDocValues extends NumericDocValues {
         // shows as its own flamegraph frame under `-XX:CompileCommand=dontinline,...`. Do NOT
         // merge this branch into a real optimization branch — the extra call layers add real
         // overhead and only exist to attribute advanceExact's self-time. See the run recipe in
-        // the commit message. Steps: (a) bounds, resolvePage = (b) cache()+(c) range+(d) miss/decode,
-        // (e) isPresent, (f) valueAt, plus the shared "absent" bookkeeping. After this split
-        // advanceExact's own self-time is just call dispatch + the doc store + the null test.
+        // the commit message. Steps: (a) bounds, beginAt = doc store + (b) cache(),
+        // resolveOnMiss = (c) range + (d) miss/decode, (e) isPresent, (f) valueAt, plus the shared
+        // "absent" bookkeeping. After this split advanceExact's own self-time is just call dispatch
+        // and the one null test (a helper cannot return out of its caller, so that line stays here).
         if (beyondMaxDoc(target)) {                    // (a) maxDoc bounds check
             return false;
         }
-        doc = target;
-        PageCache cache = resolvePage(target);         // (b) cache() + (c) range + (d) miss/decode
-        if (cache == null) {                           // Layer 4 all-nulls (or miss resolved to null)
+        PageCache cache = beginAt(target);             // fn2: doc = target; + (b) resident-page getter
+        cache = resolveOnMiss(cache, target);          // fn1: (c) range check + (d) miss/decode
+        if (cache == null) {                           // Layer 4 all-nulls (miss resolved to null)
             return markAbsent();
         }
         return finishFromCache(cache, target);         // (e) isPresent + (f) valueAt
     }
 
     /**
-     * Resolves the resident page for {@code target}: the current page on a Layer 1/2 hit, else loads
-     * the page containing the row (Layer 3 → 4 → FFM → liquid) and returns it, or {@code null} when
-     * that page is all-nulls. Extracted + dontinlined so the hit/miss resolution is a named frame and
-     * advanceExact's own self-time collapses to near-zero (only the bounds-call, the doc store, the
-     * null test, and call dispatch remain there — i.e. "technically nothing remains").
+     * fn2: records the doc position and fetches the currently-resident page. Extracted + dontinlined
+     * so the {@code doc = target} store and the {@code reader.cache()} (b) getter attribute their own
+     * self-time here instead of hiding in advanceExact's blob.
      */
-    private PageCache resolvePage(int target) throws IOException {
-        PageCache cache = reader.cache();              // (b) resident-page getter
-        if (inResidentRange(cache, target)) {          // (c) hit/miss decision
-            return cache;                              // Layer 1/2 hit — no FFM crossing
+    private PageCache beginAt(int target) {
+        doc = target;
+        return reader.cache();                         // (b) resident-page getter
+    }
+
+    /**
+     * fn1: the hit/miss block. On a Layer 1/2 hit returns {@code current} unchanged; on a miss loads
+     * the page containing the row (Layer 3 → 4 → FFM → liquid) and returns it, or {@code null} when
+     * that page is all-nulls. Extracted + dontinlined so the range check (c) and the miss/decode path
+     * (d) show as a named frame. (The all-nulls {@code return markAbsent()} lives in advanceExact
+     * because a helper cannot return out of its caller.)
+     */
+    private PageCache resolveOnMiss(PageCache current, int target) throws IOException {
+        if (inResidentRange(current, target)) {        // (c) hit/miss decision
+            return current;                            // Layer 1/2 hit — no FFM crossing
         }
         // Layer 1/2 miss — load the page containing this row (Layer 3 → 4 → FFM → liquid).
         reader.loadPageContaining(target);             // (d) decode/miss path
