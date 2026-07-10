@@ -38,6 +38,9 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Read-only {@link DocValuesProducer} that materializes per-document values from a Parquet
@@ -58,7 +61,21 @@ import java.util.Map;
  * cache) an {@link OrdinalTable} on first access. {@link #close()} releases every reader,
  * ordinal table, and the shared {@link BufferPool}, and is idempotent.
  *
- * <p>Not thread-safe: one producer serves one segment on one query thread.
+ * <h2>Thread-safety under intra-segment concurrent search</h2>
+ * One producer serves one segment, but under intra-segment concurrent search that segment's
+ * {@code [0,maxDoc)} range is split into partitions run on different threads, each calling
+ * {@code getNumeric}/{@code getBinary} on this same producer. The numeric/binary iterators hold a
+ * live reference to a mutable {@link ParquetColumnReader} (its {@code PageCache} cursor is
+ * reassigned on every page miss), so a single shared reader would be raced. To keep those readers
+ * single-threaded as they require, this producer hands each thread its OWN {@link ParquetColumnReader}
+ * (own native handle, own {@link BufferPool}/arena, own page cache) via a {@link ThreadLocal} map;
+ * a thread reusing its reader across the contiguous doc range keeps its page cache warm. All readers
+ * and pools created by any thread are tracked in concurrent registries so {@link #close()} (which may
+ * run on a different thread) reaps every one.
+ *
+ * <p>The sorted/keyword ({@link OrdinalTable}) path is different: the table is fully materialized at
+ * build time and read-only thereafter, so it is safely shared across threads once built. Its
+ * (one-time, per-field) build is serialized with a lock and runs on a dedicated build-only reader.
  */
 public final class ParquetDocValuesProducer extends DocValuesProducer {
 
@@ -69,9 +86,32 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private final int maxDoc;
     private final long parquetRowCount;
 
-    private final BufferPool bufferPool = new BufferPool();
-    private final Map<String, ParquetColumnReader> columnReaders = new HashMap<>();
-    private final Map<String, OrdinalTable> ordinalTables = new HashMap<>();
+    /**
+     * Registries of every reader/pool created on any thread, so {@link #close()} frees them all
+     * regardless of which thread allocated them. {@link BufferPool} uses a shared arena, so
+     * cross-thread close is legal. Declared before the {@link ThreadLocal}s below because the pool
+     * supplier registers into {@link #allBufferPools} at creation.
+     */
+    private final Queue<ParquetColumnReader> allColumnReaders = new ConcurrentLinkedQueue<>();
+    private final Queue<BufferPool> allBufferPools = new ConcurrentLinkedQueue<>();
+
+    /**
+     * Per-thread column readers for the numeric/binary hot path. Each partition thread gets its own
+     * field→reader map with its own {@link BufferPool}, so the mutable page-cursor state is never
+     * shared across threads. Populated lazily on the calling (partition) thread.
+     */
+    private final ThreadLocal<Map<String, ParquetColumnReader>> threadColumnReaders = ThreadLocal.withInitial(HashMap::new);
+    // Each thread's pool is registered for close the moment it is created (in the initial supplier),
+    // so it is never leaked even if the subsequent reader open fails.
+    private final ThreadLocal<BufferPool> threadBufferPool = ThreadLocal.withInitial(() -> {
+        BufferPool pool = new BufferPool();
+        allBufferPools.add(pool);
+        return pool;
+    });
+
+    /** Ordinal tables are build-once/read-only; shared across threads. Guarded by {@link #ordinalLock}. */
+    private final Map<String, OrdinalTable> ordinalTables = new ConcurrentHashMap<>();
+    private final Object ordinalLock = new Object();
 
     /** Nanoseconds spent in producer setup (file resolve + metadata read); flushed when query stats are attached. */
     private final long setupNanos;
@@ -134,7 +174,9 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         this.queryStats = queryStats;
         if (queryStats != null) {
             queryStats.addProducerSetupNanos(setupNanos);
-            for (ParquetColumnReader reader : columnReaders.values()) {
+            // Readers are opened lazily per thread; each picks up queryStats at open (see readerFor).
+            // Any already-open readers (e.g. an ordinal-table build reader) are updated here too.
+            for (ParquetColumnReader reader : allColumnReaders) {
                 reader.setQueryStats(queryStats);
             }
         }
@@ -214,11 +256,17 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         if (closed) {
             return;
         }
-        // Aggregate cache-effectiveness summary across all columns touched by this segment's
-        // producer. Per-column detail is logged by each ParquetColumnReader on its own close.
-        if (columnReaders.isEmpty() == false && logger.isDebugEnabled()) {
+        // Publish closed before draining so any late reader-open on a straggler thread is a no-op
+        // via ensureOpen(). Lucene completes all slice collection before closing the reader, so in
+        // practice no partition thread is still active here.
+        closed = true;
+        // Aggregate cache-effectiveness summary across every column touched by this segment's
+        // producer, across all partition threads. Per-column detail is logged by each reader on close.
+        if (allColumnReaders.isEmpty() == false && logger.isDebugEnabled()) {
             long hits = 0, misses = 0, decodes = 0, allNullSkips = 0;
-            for (ParquetColumnReader reader : columnReaders.values()) {
+            int columns = 0;
+            for (ParquetColumnReader reader : allColumnReaders) {
+                columns++;
                 hits += reader.stats().pageCacheHits();
                 misses += reader.stats().pageCacheMisses();
                 decodes += reader.stats().pageDecodes();
@@ -227,10 +275,10 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             long lookups = hits + misses;
             double hitRate = lookups == 0 ? 0.0 : (double) hits / lookups * 100.0;
             logger.debug(
-                "[PARQUET_DV_CACHE_STATS] segment summary: file={} columns={} | L1/2 hits={} misses={} (hitRate={}%) "
+                "[PARQUET_DV_CACHE_STATS] segment summary: file={} readers={} | L1/2 hits={} misses={} (hitRate={}%) "
                     + "| L4 allNullSkips={} | FFM pageDecodes={}",
                 parquetFile,
-                columnReaders.size(),
+                columns,
                 hits,
                 misses,
                 String.format(Locale.ROOT, "%.2f", hitRate),
@@ -238,9 +286,10 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
                 decodes
             );
         }
-        closed = true;
         IOException first = null;
-        for (ParquetColumnReader reader : columnReaders.values()) {
+        // Close every reader opened on any thread, then every pool. Pools use a shared arena, so
+        // freeing them here (possibly off the allocating thread) is legal.
+        for (ParquetColumnReader reader : allColumnReaders) {
             try {
                 reader.close();
             } catch (IOException | RuntimeException e) {
@@ -250,9 +299,18 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
                 // Suppress per-reader errors so every reader gets a chance to close.
             }
         }
-        columnReaders.clear();
+        for (BufferPool pool : allBufferPools) {
+            try {
+                pool.close();
+            } catch (RuntimeException e) {
+                // Suppress so every pool gets a chance to close.
+            }
+        }
+        allColumnReaders.clear();
+        allBufferPools.clear();
+        threadColumnReaders.remove();
+        threadBufferPool.remove();
         ordinalTables.clear();
-        bufferPool.close();
         if (first != null) {
             throw first;
         }
@@ -290,22 +348,58 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         };
     }
 
+    /**
+     * Returns the calling thread's own {@link ParquetColumnReader} for {@code field}, opening one
+     * (with the thread's own {@link BufferPool}) on first use. Each thread's reader is independent —
+     * its own native handle and mutable page cache — so concurrent intra-segment partitions never
+     * race. Every opened reader/pool is registered for close.
+     */
     private ParquetColumnReader readerFor(FieldInfo field, boolean repeated) throws IOException {
-        ParquetColumnReader reader = columnReaders.get(field.getName());
+        Map<String, ParquetColumnReader> readers = threadColumnReaders.get();
+        ParquetColumnReader reader = readers.get(field.getName());
         if (reader == null) {
-            reader = ParquetColumnReader.open(parquetFile, field.getName(), physicalType(field), repeated, bufferPool);
+            BufferPool pool = threadBufferPool.get();
+            reader = ParquetColumnReader.open(parquetFile, field.getName(), physicalType(field), repeated, pool);
             reader.setQueryStats(queryStats);
-            columnReaders.put(field.getName(), reader);
+            readers.put(field.getName(), reader);
+            allColumnReaders.add(reader);
         }
         return reader;
     }
 
+    /**
+     * Returns the shared, immutable {@link OrdinalTable} for {@code field}, building it once. The
+     * table is fully materialized (no live reader) and read-only, so it is safe to share across
+     * partition threads. The build is serialized and runs on a dedicated reader (with its own pool)
+     * that is closed immediately after, so it never interferes with the per-thread hot-path readers.
+     */
     private OrdinalTable ordinalTableFor(FieldInfo field, boolean multiValued) throws IOException {
         OrdinalTable table = ordinalTables.get(field.getName());
-        if (table == null) {
-            ParquetColumnReader reader = readerFor(field, multiValued);
-            table = multiValued ? OrdinalTable.buildMultiValued(reader, maxDoc) : OrdinalTable.buildSingleValued(reader, maxDoc);
-            ordinalTables.put(field.getName(), table);
+        if (table != null) {
+            return table;
+        }
+        synchronized (ordinalLock) {
+            table = ordinalTables.get(field.getName());
+            if (table == null) {
+                try (BufferPool buildPool = new BufferPool()) {
+                    ParquetColumnReader reader = ParquetColumnReader.open(
+                        parquetFile,
+                        field.getName(),
+                        physicalType(field),
+                        multiValued,
+                        buildPool
+                    );
+                    reader.setQueryStats(queryStats);
+                    try {
+                        table = multiValued
+                            ? OrdinalTable.buildMultiValued(reader, maxDoc)
+                            : OrdinalTable.buildSingleValued(reader, maxDoc);
+                    } finally {
+                        reader.close();
+                    }
+                }
+                ordinalTables.put(field.getName(), table);
+            }
         }
         return table;
     }

@@ -30,9 +30,15 @@ import java.util.Map;
  * size that still fits the slot's current backing segment returns that same segment (sliced
  * to the requested length); a larger request replaces the backing segment.
  *
- * <p>Because doc IDs arrive ascending and a producer is single-threaded (one segment per
- * query thread), a pool shared across a producer's column readers needs no synchronization.
- * {@link #close()} frees every slot at once (the "release" step).
+ * <p>A single pool instance is confined to one thread: doc IDs arrive ascending and each pool
+ * serves one thread's column readers, so slot access needs no synchronization. Under intra-segment
+ * concurrent search each partition thread gets its OWN pool (see {@code ParquetDocValuesProducer}),
+ * so pools are never shared across threads. {@link #close()} frees every slot at once (the "release"
+ * step); it may run on a different thread than the one that allocated the segments (the producer
+ * closes all threads' pools centrally), which is why the backing {@link Arena} is a
+ * {@linkplain Arena#ofShared() shared} arena — a confined arena would reject cross-thread close.
+ * The arena is only touched on the cold page-decode / slow-read paths (the warm per-doc scan reads
+ * heap {@code long[]}), so the shared arena's marginally costlier access is off the hot path.
  *
  * <p>Callers must re-fetch (not cache across calls) a slot's segment, since a growth event
  * replaces it. Returned segments are owned by the pool and must not be freed by callers.
@@ -47,7 +53,8 @@ public final class BufferPool implements AutoCloseable {
         long capacity;
     }
 
-    private final Arena arena = Arena.ofConfined();
+    // Shared (not confined) so the producer can close pools allocated on other partition threads.
+    private final Arena arena = Arena.ofShared();
     private final Map<String, Slot> slots = new HashMap<>();
     private boolean closed;
 
