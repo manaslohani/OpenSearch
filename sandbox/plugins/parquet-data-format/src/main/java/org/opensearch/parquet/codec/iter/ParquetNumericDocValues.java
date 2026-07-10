@@ -39,28 +39,63 @@ public final class ParquetNumericDocValues extends NumericDocValues {
 
     @Override
     public boolean advanceExact(int target) throws IOException {
-        if (target >= maxDoc) {
-            doc = NO_MORE_DOCS;
-            currentPresent = false;
+        // PROFILING BUILD: the per-doc body is split into named helper methods so each step
+        // shows as its own flamegraph frame under `-XX:CompileCommand=dontinline,...`. Do NOT
+        // merge this branch into a real optimization branch — the extra call layers add real
+        // overhead and only exist to attribute advanceExact's self-time. See the run recipe in
+        // the commit message. Steps: (a) bounds, (b) cache(), (c) range, (d) miss/decode,
+        // (e) isPresent, (f) valueAt, plus the shared "absent" bookkeeping.
+        if (beyondMaxDoc(target)) {                    // (a) maxDoc bounds check
             return false;
         }
         doc = target;
-        PageCache cache = reader.cache();
-        if (cache != null && target <= cache.lastRow && target >= cache.firstRow) {
-            // Layer 1/2 hit — served from the resident page, no FFM crossing.
-        } else {
-            // Layer 1/2 miss — load the page containing this row (Layer 3 → 4 → FFM).
-            reader.loadPageContaining(target);
+        PageCache cache = reader.cache();              // (b) resident-page getter
+        if (inResidentRange(cache, target) == false) { // (c) hit/miss decision
+            // Layer 1/2 miss — load the page containing this row (Layer 3 → 4 → FFM → liquid).
+            reader.loadPageContaining(target);         // (d) decode/miss path
             cache = reader.cache();
-            if (cache == null) { // Layer 4: page is all-nulls.
-                currentPresent = false;
-                currentValue = 0L;
-                return false;
+            if (cache == null) {                       // Layer 4: page is all-nulls
+                return markAbsent();
             }
         }
-        currentPresent = cache.isPresent(target);
-        currentValue = currentPresent ? cache.valueAt(target) : 0L;
+        return finishFromCache(cache, target);         // (e) isPresent + (f) valueAt
+    }
+
+    /** (a) maxDoc bounds check. Extracted + dontinlined so its self-time is a separate frame. */
+    private boolean beyondMaxDoc(int target) {
+        if (target >= maxDoc) {
+            doc = NO_MORE_DOCS;
+            currentPresent = false;
+            return true;
+        }
+        return false;
+    }
+
+    /** (c) resident-page range check (hit vs miss). Extracted + dontinlined for its own frame. */
+    private static boolean inResidentRange(PageCache cache, int target) {
+        return cache != null && target <= cache.lastRow && target >= cache.firstRow;
+    }
+
+    /**
+     * (e) presence bit-test + (f) value read, split from advanceExact so PageCache.isPresent and
+     * PageCache.valueAt (dontinlined) attribute their own self-time here instead of being inlined
+     * into advanceExact's opaque self-blob.
+     */
+    private boolean finishFromCache(PageCache cache, int target) {
+        currentPresent = cache.isPresent(target);      // (e)
+        currentValue = currentPresent ? cache.valueAt(target) : 0L; // (f)
         return currentPresent;
+    }
+
+    /**
+     * The "produce an absent result" bookkeeping, shared by the all-nulls miss tail and (via the
+     * bounds-check path) any absent exit. Dontinlined so this tail's cost is a named frame; on a
+     * dense/required column (e.g. UserID) it should sample near-zero, proving it is not a cost center.
+     */
+    private boolean markAbsent() {
+        currentPresent = false;
+        currentValue = 0L;
+        return false;
     }
 
     @Override
