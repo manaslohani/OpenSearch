@@ -44,12 +44,16 @@ import java.io.IOException;
  *
  * @opensearch.internal
  */
-final class SortableLongBitsToNumericDoubleValues extends NumericDoubleValues {
+final class SortableLongBitsToNumericDoubleValues extends NumericDoubleValues implements BulkDoubleValues {
 
     private final NumericDocValues values;
+    /** Non-null when the wrapped values support a contiguous raw-long bulk read; enables fillDoubles. */
+    private final BulkLongDocValues bulkLongs;
+    private long[] longScratch = new long[0];
 
     SortableLongBitsToNumericDoubleValues(NumericDocValues values) {
         this.values = values;
+        this.bulkLongs = values instanceof BulkLongDocValues ? (BulkLongDocValues) values : null;
     }
 
     @Override
@@ -65,6 +69,21 @@ final class SortableLongBitsToNumericDoubleValues extends NumericDoubleValues {
     /** Return the wrapped values. */
     public NumericDocValues getLongValues() {
         return values;
+    }
+
+    @Override
+    public int fillDoubles(int minDoc, int maxExclusive, double[] dst) throws IOException {
+        if (bulkLongs == null) {
+            return 0;
+        }
+        if (longScratch.length < dst.length) {
+            longScratch = new long[dst.length];
+        }
+        int n = bulkLongs.fillLongs(minDoc, maxExclusive, longScratch);
+        for (int i = 0; i < n; i++) {
+            dst[i] = NumericUtils.sortableLongToDouble(longScratch[i]);
+        }
+        return n;
     }
 
     @Override

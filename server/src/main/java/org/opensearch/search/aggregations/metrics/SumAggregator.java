@@ -40,6 +40,9 @@ import org.opensearch.common.util.BigArrays;
 import org.opensearch.common.util.DoubleArray;
 import org.opensearch.index.codec.composite.CompositeIndexFieldInfo;
 import org.opensearch.index.compositeindex.datacube.MetricStat;
+import org.opensearch.index.fielddata.BulkDoubleValues;
+import org.opensearch.index.fielddata.FieldData;
+import org.opensearch.index.fielddata.NumericDoubleValues;
 import org.opensearch.index.fielddata.SortedNumericDoubleValues;
 import org.opensearch.search.DocValueFormat;
 import org.opensearch.search.aggregations.Aggregator;
@@ -120,7 +123,14 @@ public class SumAggregator extends NumericMetricsAggregator.SingleValue implemen
         final BigArrays bigArrays = context.bigArrays();
         final SortedNumericDoubleValues values = valuesSource.doubleValues(ctx);
         final CompensatedSum kahanSummation = new CompensatedSum(0, 0);
+        // Bulk fast path for match-all collectRange over a single-valued source that exposes a
+        // contiguous block read (e.g. the Parquet codec). When present, the range is summed from a
+        // reused double[] with no per-doc advanceExact chain; any doc it can't serve in bulk (absent,
+        // nullable page, page boundary) falls back to the per-doc path below.
+        final NumericDoubleValues singleton = FieldData.unwrapSingleton(values);
+        final BulkDoubleValues bulkDoubles = singleton instanceof BulkDoubleValues ? (BulkDoubleValues) singleton : null;
         return new LeafBucketCollectorBase(sub, values) {
+            private double[] bulkBuf;
             @Override
             public void collect(int doc, long bucket) throws IOException {
                 if (values.advanceExact(doc)) {
@@ -151,6 +161,16 @@ public class SumAggregator extends NumericMetricsAggregator.SingleValue implemen
             @Override
             public void collectRange(int min, int max) throws IOException {
                 setKahanSummation(0);
+                if (bulkDoubles != null) {
+                    collectRangeBulk(min, max);
+                } else {
+                    collectRangePerDoc(min, max);
+                }
+                sums.set(0, kahanSummation.value());
+                compensations.set(0, kahanSummation.delta());
+            }
+
+            private void collectRangePerDoc(int min, int max) throws IOException {
                 for (int docId = min; docId < max; docId++) {
                     if (values.advanceExact(docId)) {
                         for (int i = 0; i < values.docValueCount(); i++) {
@@ -158,8 +178,31 @@ public class SumAggregator extends NumericMetricsAggregator.SingleValue implemen
                         }
                     }
                 }
-                sums.set(0, kahanSummation.value());
-                compensations.set(0, kahanSummation.delta());
+            }
+
+            private void collectRangeBulk(int min, int max) throws IOException {
+                if (bulkBuf == null) {
+                    bulkBuf = new double[4096];
+                }
+                int docId = min;
+                while (docId < max) {
+                    int n = bulkDoubles.fillDoubles(docId, max, bulkBuf);
+                    if (n <= 0) {
+                        // Bulk can't serve this doc (absent / nullable page / boundary): per-doc it,
+                        // then continue bulk from the next doc.
+                        if (values.advanceExact(docId)) {
+                            for (int i = 0; i < values.docValueCount(); i++) {
+                                kahanSummation.add(values.nextValue());
+                            }
+                        }
+                        docId++;
+                        continue;
+                    }
+                    for (int i = 0; i < n; i++) {
+                        kahanSummation.add(bulkBuf[i]);
+                    }
+                    docId += n;
+                }
             }
 
             private void setKahanSummation(long bucket) {

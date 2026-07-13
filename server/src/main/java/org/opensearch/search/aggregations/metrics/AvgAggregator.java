@@ -46,6 +46,9 @@ import org.opensearch.index.compositeindex.datacube.MetricStat;
 import org.opensearch.index.compositeindex.datacube.startree.index.StarTreeValues;
 import org.opensearch.index.compositeindex.datacube.startree.utils.StarTreeUtils;
 import org.opensearch.index.compositeindex.datacube.startree.utils.iterator.SortedNumericStarTreeValuesIterator;
+import org.opensearch.index.fielddata.BulkDoubleValues;
+import org.opensearch.index.fielddata.FieldData;
+import org.opensearch.index.fielddata.NumericDoubleValues;
 import org.opensearch.index.fielddata.SortedNumericDoubleValues;
 import org.opensearch.search.DocValueFormat;
 import org.opensearch.search.aggregations.Aggregator;
@@ -130,8 +133,13 @@ class AvgAggregator extends NumericMetricsAggregator.SingleValue implements Star
         final BigArrays bigArrays = context.bigArrays();
         final SortedNumericDoubleValues values = valuesSource.doubleValues(ctx);
         final CompensatedSum kahanSummation = new CompensatedSum(0, 0);
+        // Bulk fast path for match-all collectRange over a single-valued block-readable source (see
+        // SumAggregator); falls back to the per-doc path for any doc it can't serve in bulk.
+        final NumericDoubleValues singleton = FieldData.unwrapSingleton(values);
+        final BulkDoubleValues bulkDoubles = singleton instanceof BulkDoubleValues ? (BulkDoubleValues) singleton : null;
 
         return new LeafBucketCollectorBase(sub, values) {
+            private double[] bulkBuf;
             @Override
             public void collect(int doc, long bucket) throws IOException {
                 if (values.advanceExact(doc)) {
@@ -168,6 +176,13 @@ class AvgAggregator extends NumericMetricsAggregator.SingleValue implements Star
             @Override
             public void collectRange(int min, int max) throws IOException {
                 setKahanSummation(0);
+                int count = bulkDoubles != null ? collectRangeBulk(min, max) : collectRangePerDoc(min, max);
+                counts.increment(0, count);
+                sums.set(0, kahanSummation.value());
+                compensations.set(0, kahanSummation.delta());
+            }
+
+            private int collectRangePerDoc(int min, int max) throws IOException {
                 int count = 0;
                 for (int docId = min; docId < max; docId++) {
                     if (values.advanceExact(docId)) {
@@ -178,9 +193,35 @@ class AvgAggregator extends NumericMetricsAggregator.SingleValue implements Star
                         }
                     }
                 }
-                counts.increment(0, count);
-                sums.set(0, kahanSummation.value());
-                compensations.set(0, kahanSummation.delta());
+                return count;
+            }
+
+            private int collectRangeBulk(int min, int max) throws IOException {
+                if (bulkBuf == null) {
+                    bulkBuf = new double[4096];
+                }
+                int count = 0;
+                int docId = min;
+                while (docId < max) {
+                    int n = bulkDoubles.fillDoubles(docId, max, bulkBuf);
+                    if (n <= 0) {
+                        if (values.advanceExact(docId)) {
+                            int valueCount = values.docValueCount();
+                            count += valueCount;
+                            for (int i = 0; i < valueCount; i++) {
+                                kahanSummation.add(values.nextValue());
+                            }
+                        }
+                        docId++;
+                        continue;
+                    }
+                    for (int i = 0; i < n; i++) {
+                        kahanSummation.add(bulkBuf[i]);
+                    }
+                    count += n;
+                    docId += n;
+                }
+                return count;
             }
 
             private void setKahanSummation(long bucket) {

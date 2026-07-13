@@ -541,12 +541,16 @@ public enum FieldData {
      *
      * @opensearch.internal
      */
-    private static class DoubleCastedValues extends NumericDoubleValues {
+    private static class DoubleCastedValues extends NumericDoubleValues implements BulkDoubleValues {
 
         private final NumericDocValues values;
+        /** Non-null when the wrapped values support a contiguous raw-long bulk read. */
+        private final BulkLongDocValues bulkLongs;
+        private long[] longScratch = new long[0];
 
         DoubleCastedValues(NumericDocValues values) {
             this.values = values;
+            this.bulkLongs = values instanceof BulkLongDocValues ? (BulkLongDocValues) values : null;
         }
 
         @Override
@@ -562,6 +566,21 @@ public enum FieldData {
         @Override
         public int advance(int target) throws IOException {
             return values.advance(target);
+        }
+
+        @Override
+        public int fillDoubles(int minDoc, int maxExclusive, double[] dst) throws IOException {
+            if (bulkLongs == null) {
+                return 0;
+            }
+            if (longScratch.length < dst.length) {
+                longScratch = new long[dst.length];
+            }
+            int n = bulkLongs.fillLongs(minDoc, maxExclusive, longScratch);
+            for (int i = 0; i < n; i++) {
+                dst[i] = (double) longScratch[i]; // integral long cast to double (matches doubleValue())
+            }
+            return n;
         }
     }
 
