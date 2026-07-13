@@ -58,7 +58,11 @@ public final class ParquetNumericDocValues extends NumericDocValues {
                 return false;
             }
         }
-        currentPresent = cache.isPresent(target);
+        // For a required (no-null) page, presence is a constant true — skip the presenceBits[] load
+        // and mask entirely (that bit-test was a large slice of per-doc cost on dense columns like
+        // UserID). Nullable pages still consult the bitset. Short-circuit keeps valueAt off the
+        // absent branch.
+        currentPresent = cache.allPresent || cache.isPresent(target);
         currentValue = currentPresent ? cache.valueAt(target) : 0L;
         return currentPresent;
     }

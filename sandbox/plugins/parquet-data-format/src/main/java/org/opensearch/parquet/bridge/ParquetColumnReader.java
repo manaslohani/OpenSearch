@@ -414,6 +414,11 @@ public final class ParquetColumnReader implements Closeable {
         pc.lastRow = lastRow;
         pc.presenceBits = presence.asSlice(0, (long) ((pageRows + 63) >>> 6) * ValueLayout.JAVA_LONG.byteSize())
             .toArray(ValueLayout.JAVA_LONG);
+        // A page with zero nulls (per the column page index) is entirely present, so the per-doc
+        // hot path can skip the presence bit-test. A negative null count means "unknown" — treat as
+        // not-all-present so the bitset is consulted. Required columns report nullCount == 0.
+        long pageNullCount = pageIndex.nullCountOf(pageIdx);
+        pc.allPresent = pageNullCount == 0;
 
         if (type.isPrimitive()) {
             pc.values = valueBuf.asSlice(0, (long) pageRows * ValueLayout.JAVA_LONG.byteSize()).toArray(ValueLayout.JAVA_LONG);

@@ -57,7 +57,8 @@ public final class ParquetBinaryDocValues extends BinaryDocValues {
                 return false;
             }
         }
-        currentPresent = cache.isPresent(target);
+        // Required (no-null) page → presence is constant true; skip the presenceBits[] test.
+        currentPresent = cache.allPresent || cache.isPresent(target);
         if (currentPresent) {
             int rel = (int) (target - cache.firstRow);
             int start = cache.byteOffsets[rel];

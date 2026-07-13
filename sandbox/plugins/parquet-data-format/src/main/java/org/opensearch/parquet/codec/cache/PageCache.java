@@ -40,6 +40,14 @@ public final class PageCache {
     /** Packed presence bitset: bit {@code i} set when row {@code firstRow + i} is non-null. */
     public long[] presenceBits;
 
+    /**
+     * True when every row in this page is present (the page has zero nulls). Set at decode time
+     * from the column page index's null count. Lets the per-doc hot path skip the {@link #isPresent}
+     * bit-test entirely for required (non-null) columns — the common case — turning presence into a
+     * constant-true and dropping a whole {@code presenceBits[]} cache stream from the scan.
+     */
+    public boolean allPresent;
+
     /** Number of rows in the cached page. */
     public int rowCount() {
         return (int) (lastRow - firstRow + 1);
