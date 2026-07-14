@@ -812,6 +812,13 @@ pub unsafe extern "C" fn parquet_get_pool_stats(out_buf: *mut i64) {
 use std::fs::File;
 use std::sync::MutexGuard;
 
+use arrow::array::{Array, ArrayRef};
+use arrow::datatypes::DataType as ArrowDataType;
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection,
+    RowSelector,
+};
+use parquet::arrow::ProjectionMask;
 use parquet::basic::Type as PhysicalType;
 use parquet::column::reader::{ColumnReader, ColumnReaderImpl};
 use parquet::data_type::DataType as ParquetDataType;
@@ -838,17 +845,28 @@ const TYPE_BYTE_ARRAY: i32 = 5;
 /// and the row-group layout needed to translate a global row position into a
 /// `(row_group, local_offset)` pair. Random access reopens the relevant row
 /// group per call — this is the documented *slow path*; the hot path goes
-/// through `parquet_decode_page_at_row` (page-resident caching on the Java side).
+/// through `parquet_decode_page_at_row` (page-resident caching on the Java side),
+/// which decodes via the arrow-rs record-batch reader built from the
+/// once-parsed `arrow_metadata` (no footer re-read per decode).
 struct ColumnReaderState {
+    /// Low-level reader kept for the slow paths (`parquet_read_value_at_row`,
+    /// `parquet_read_repeated_at_row`); the page-decode hot path uses
+    /// `arrow_metadata` + `file` instead.
     reader: SerializedFileReader<File>,
+    /// Parsed footer + arrow schema, constructed ONCE at `open()` (including the
+    /// page index) and reused for every `parquet_decode_page_at_row` via
+    /// `ParquetRecordBatchReaderBuilder::new_with_metadata` — cloning it is
+    /// cheap (`Arc`s all the way down).
+    arrow_metadata: ArrowReaderMetadata,
+    /// File handle for the arrow decode path; `try_clone()`d per decode (cheaper
+    /// than reopening by path).
+    file: File,
     /// Leaf column index within the Parquet schema descriptor.
     leaf_idx: usize,
     /// Physical type of the column (validated against the caller's expectation).
     physical_type: PhysicalType,
     /// True when the column has a repetition level > 0 (multi-valued).
     repeated: bool,
-    /// Max definition level of the column (0 = required; >0 = optional/nested).
-    max_def_level: i16,
     /// Total number of rows (records) in the file.
     row_count: i64,
     /// Global row index of the first row in each row group.
@@ -892,6 +910,11 @@ struct PageEntry {
 impl ColumnReaderState {
     fn open(filename: &str, column: &str, expected_type: i32) -> Result<ColumnReaderState, String> {
         let file = File::open(filename).map_err(|e| format!("Failed to open '{}': {}", filename, e))?;
+        // Keep a second handle to the same file for the arrow decode path
+        // (the first is consumed by `SerializedFileReader`).
+        let arrow_file = file
+            .try_clone()
+            .map_err(|e| format!("Failed to clone file handle for '{}': {}", filename, e))?;
         // Load the Parquet page index (OffsetIndex + ColumnIndex) so we can build
         // the Layer 3/4 page layout. Falls back gracefully to row-group
         // granularity if the file was written without a page index.
@@ -901,19 +924,19 @@ impl ColumnReaderState {
 
         // Extract everything we need from the (borrowed) metadata inside a block so
         // the borrow ends before we move `reader` into the returned struct.
-        let (leaf_idx, physical_type, repeated, max_def_level, row_count, rg_first_row, rg_num_rows, pages) = {
+        let (leaf_idx, physical_type, repeated, row_count, rg_first_row, rg_num_rows, pages, arrow_metadata) = {
             let metadata = reader.metadata();
             let schema = metadata.file_metadata().schema_descr();
 
-            let mut found: Option<(usize, PhysicalType, i16, i16)> = None;
+            let mut found: Option<(usize, PhysicalType, i16)> = None;
             for i in 0..schema.num_columns() {
                 let descr = schema.column(i);
                 if descr.name() == column || descr.path().string() == column {
-                    found = Some((i, descr.physical_type(), descr.max_rep_level(), descr.max_def_level()));
+                    found = Some((i, descr.physical_type(), descr.max_rep_level()));
                     break;
                 }
             }
-            let (leaf_idx, phys, max_rep, max_def) = found.ok_or_else(|| {
+            let (leaf_idx, phys, max_rep) = found.ok_or_else(|| {
                 format!("Column '{}' not found in parquet file '{}'", column, filename)
             })?;
 
@@ -939,17 +962,29 @@ impl ColumnReaderState {
 
             let pages = build_page_layout(metadata, leaf_idx, phys, &rg_first_row, &rg_num_rows);
 
-            (leaf_idx, phys, max_rep > 0, max_def, row_count, rg_first_row, rg_num_rows, pages)
+            // Parse the footer into arrow-reader form ONCE. `try_new` reuses the
+            // already-parsed `ParquetMetaData` (page index included, loaded above),
+            // so per-decode builders never re-read the footer from disk.
+            let arrow_metadata = ArrowReaderMetadata::try_new(
+                std::sync::Arc::new(metadata.clone()),
+                ArrowReaderOptions::new(),
+            )
+            .map_err(|e| {
+                format!("Failed to build arrow reader metadata for '{}': {}", filename, e)
+            })?;
+
+            (leaf_idx, phys, max_rep > 0, row_count, rg_first_row, rg_num_rows, pages, arrow_metadata)
         };
 
         let liquid_file_id = crate::liquid_page_cache::file_id(filename);
 
         Ok(ColumnReaderState {
             reader,
+            arrow_metadata,
+            file: arrow_file,
             leaf_idx,
             physical_type,
             repeated,
-            max_def_level,
             row_count,
             rg_first_row,
             rg_num_rows,
@@ -1618,49 +1653,6 @@ pub unsafe extern "C" fn parquet_get_column_page_index(
     Ok(RC_OK)
 }
 
-/// Decodes one page's worth of single-valued records, returning a per-row
-/// presence flag (`true` = value present) and the dense list of non-null values
-/// in row order. `skip` records are skipped first, then `num_rows` records are
-/// read. Works for required columns (`max_def_level == 0`, all present) and
-/// optional non-repeated columns.
-fn decode_page_records<T: ParquetDataType>(
-    r: &mut ColumnReaderImpl<T>,
-    skip: usize,
-    num_rows: usize,
-    max_def_level: i16,
-) -> Result<(Vec<bool>, Vec<T::T>), String> {
-    if skip > 0 {
-        let skipped = r.skip_records(skip).map_err(|e| e.to_string())?;
-        if skipped < skip {
-            return Err(format!(
-                "page decode: requested skip of {} records but only {} available",
-                skip, skipped
-            ));
-        }
-    }
-
-    let mut def_levels: Vec<i16> = Vec::with_capacity(num_rows);
-    let mut values: Vec<T::T> = Vec::with_capacity(num_rows);
-    let (records_read, _values_read, _levels_read) = r
-        .read_records(num_rows, Some(&mut def_levels), None, &mut values)
-        .map_err(|e| e.to_string())?;
-    if records_read < num_rows {
-        return Err(format!(
-            "page decode: expected {} records but read {}",
-            num_rows, records_read
-        ));
-    }
-
-    // Build the per-row presence vector. For required columns `read_records`
-    // ignores the def-level buffer and every row is present.
-    let presence = if max_def_level == 0 {
-        vec![true; num_rows]
-    } else {
-        def_levels.iter().take(num_rows).map(|d| *d == max_def_level).collect()
-    };
-    Ok((presence, values))
-}
-
 /// Packs a per-row presence slice into a little-endian `long[]` bitset (bit i set
 /// when row i is present), writing into `out` (capacity `out_words`). Returns the
 /// number of words required; on capacity shortfall writes nothing and the caller
@@ -1738,14 +1730,11 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
     }
 
     let page_idx = state.page_for_row(row)?;
-    // Copy out the page's coordinates before borrowing the reader mutably.
     let (rg_idx, local_first, num_rows, first_global) = {
         let e = &state.pages[page_idx];
         (e.rg_idx, e.local_first_row, e.num_rows, e.global_first_row)
     };
     let num_rows_usize = num_rows as usize;
-    let max_def_level = state.max_def_level;
-    let physical_type = state.physical_type;
 
     // Always report the page row range so the caller can bound its cache and
     // size buffers even on the overflow path.
@@ -1780,140 +1769,287 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
         }
     }
 
-    let rg = state.reader.get_row_group(rg_idx).map_err(|e| e.to_string())?;
-    let col = rg.get_column_reader(state.leaf_idx).map_err(|e| e.to_string())?;
-    let skip = local_first as usize;
+    // Liquid miss: decode the whole page via the arrow record-batch reader.
+    let array = decode_page_arrow(state, rg_idx, local_first, num_rows_usize)?;
 
-    // Decode the page into per-row presence + raw-bit values (primitives) or a
-    // backing byte buffer + CSR offsets (BYTE_ARRAY), then validate caller
-    // capacities and either copy out or signal overflow.
-    match col {
-        ColumnReader::Int32ColumnReader(mut r) => {
-            let (presence, values) = decode_page_records(&mut r, skip, num_rows_usize, max_def_level)?;
-            let longs = expand_primitive(&presence, &values, |v| v as i64);
+    match state.physical_type {
+        PhysicalType::BOOLEAN
+        | PhysicalType::INT32
+        | PhysicalType::INT64
+        | PhysicalType::FLOAT
+        | PhysicalType::DOUBLE => {
+            let (longs, presence) = arrow_primitive_to_page(&array)?;
             if let Some(eid) = lc_eid {
                 crate::liquid_page_cache::put_page(eid, &longs, &presence);
             }
-            return write_primitive_page(
+            write_primitive_page(
                 &longs, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
                 out_presence_bitset, out_presence_bits_cap,
-            );
+            )
         }
-        ColumnReader::Int64ColumnReader(mut r) => {
-            let (presence, values) = decode_page_records(&mut r, skip, num_rows_usize, max_def_level)?;
-            let longs = expand_primitive(&presence, &values, |v| v);
-            if let Some(eid) = lc_eid {
-                crate::liquid_page_cache::put_page(eid, &longs, &presence);
-            }
-            return write_primitive_page(
-                &longs, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
-                out_presence_bitset, out_presence_bits_cap,
-            );
-        }
-        ColumnReader::FloatColumnReader(mut r) => {
-            let (presence, values) = decode_page_records(&mut r, skip, num_rows_usize, max_def_level)?;
-            let longs = expand_primitive(&presence, &values, |v| v.to_bits() as i64);
-            if let Some(eid) = lc_eid {
-                crate::liquid_page_cache::put_page(eid, &longs, &presence);
-            }
-            return write_primitive_page(
-                &longs, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
-                out_presence_bitset, out_presence_bits_cap,
-            );
-        }
-        ColumnReader::DoubleColumnReader(mut r) => {
-            let (presence, values) = decode_page_records(&mut r, skip, num_rows_usize, max_def_level)?;
-            let longs = expand_primitive(&presence, &values, |v| v.to_bits() as i64);
-            if let Some(eid) = lc_eid {
-                crate::liquid_page_cache::put_page(eid, &longs, &presence);
-            }
-            return write_primitive_page(
-                &longs, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
-                out_presence_bitset, out_presence_bits_cap,
-            );
-        }
-        ColumnReader::BoolColumnReader(mut r) => {
-            let (presence, values) = decode_page_records(&mut r, skip, num_rows_usize, max_def_level)?;
-            let longs = expand_primitive(&presence, &values, |v| if v { 1i64 } else { 0i64 });
-            if let Some(eid) = lc_eid {
-                crate::liquid_page_cache::put_page(eid, &longs, &presence);
-            }
-            return write_primitive_page(
-                &longs, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
-                out_presence_bitset, out_presence_bits_cap,
-            );
-        }
-        ColumnReader::ByteArrayColumnReader(mut r) => {
-            let (presence, values) = decode_page_records(&mut r, skip, num_rows_usize, max_def_level)?;
-            let slices = expand_bytes(&presence, &values);
-            return write_bytes_page(
+        PhysicalType::BYTE_ARRAY | PhysicalType::FIXED_LEN_BYTE_ARRAY => {
+            let (slices, presence) = arrow_bytes_to_page(&array)?;
+            write_bytes_page(
                 &slices, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
                 out_byte_offsets, out_byte_offsets_cap, out_presence_bitset, out_presence_bits_cap,
-            );
+            )
         }
-        ColumnReader::FixedLenByteArrayColumnReader(mut r) => {
-            let (presence, values) = decode_page_records(&mut r, skip, num_rows_usize, max_def_level)?;
-            let slices = expand_flba(&presence, &values);
-            return write_bytes_page(
-                &slices, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
-                out_byte_offsets, out_byte_offsets_cap, out_presence_bitset, out_presence_bits_cap,
-            );
-        }
-        ColumnReader::Int96ColumnReader(_) => {
-            let _ = physical_type; // silence unused in this arm
+        PhysicalType::INT96 => {
             Err("parquet_decode_page_at_row: INT96 columns are not supported".to_string())
         }
     }
 }
 
-/// Expands dense non-null primitive values into a per-row `i64` slot vector
-/// (null rows hold 0), applying `to_bits` to each present value.
-fn expand_primitive<T: Copy>(presence: &[bool], dense: &[T], to_bits: impl Fn(T) -> i64) -> Vec<i64> {
-    let mut out = Vec::with_capacity(presence.len());
-    let mut di = 0usize;
-    for &present in presence {
-        if present {
-            out.push(to_bits(dense[di]));
-            di += 1;
-        } else {
-            out.push(0);
-        }
+/// Decodes one whole page (`num_rows` records starting `local_first` into row
+/// group `rg_idx`) of the state's leaf column into a single arrow array.
+///
+/// Selection shape: `[skip(local_first), select(num_rows), skip(rest of RG)]`
+/// over just `rg_idx`; batch size = page rows so the reader usually yields one
+/// batch (multiple batches are concatenated). The builder reuses the state's
+/// once-parsed `ArrowReaderMetadata` and a `try_clone()` of its file handle —
+/// no footer re-read, no path re-open.
+///
+/// Dictionary-encoded columns: the writer does not embed a `Dictionary` arrow
+/// type hint, so parquet-rs hydrates dictionary pages to plain arrays. As a
+/// belt-and-braces guard the result is cast to the dictionary's value type if
+/// a `DictionaryArray` ever surfaces, keeping the conversion helpers simple.
+fn decode_page_arrow(
+    state: &ColumnReaderState,
+    rg_idx: usize,
+    local_first: i64,
+    num_rows: usize,
+) -> Result<ArrayRef, String> {
+    let rg_rows = state.rg_num_rows[rg_idx];
+    let trailing = rg_rows - local_first - num_rows as i64;
+    let mut selectors = Vec::with_capacity(3);
+    if local_first > 0 {
+        selectors.push(RowSelector::skip(local_first as usize));
     }
-    out
+    selectors.push(RowSelector::select(num_rows));
+    if trailing > 0 {
+        selectors.push(RowSelector::skip(trailing as usize));
+    }
+
+    let file = state
+        .file
+        .try_clone()
+        .map_err(|e| format!("page decode: failed to clone file handle: {}", e))?;
+    let mask = ProjectionMask::leaves(state.arrow_metadata.parquet_schema(), [state.leaf_idx]);
+    let reader =
+        ParquetRecordBatchReaderBuilder::new_with_metadata(file, state.arrow_metadata.clone())
+            .with_row_groups(vec![rg_idx])
+            .with_projection(mask)
+            .with_batch_size(num_rows)
+            .with_row_selection(RowSelection::from(selectors))
+            .build()
+            .map_err(|e| format!("page decode: failed to build arrow reader: {}", e))?;
+
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(1);
+    for batch in reader {
+        let batch = batch.map_err(|e| format!("page decode: batch read failed: {}", e))?;
+        if batch.num_columns() != 1 {
+            return Err(format!(
+                "page decode: expected 1 projected column, got {}",
+                batch.num_columns()
+            ));
+        }
+        arrays.push(batch.column(0).clone());
+    }
+    let array = match arrays.len() {
+        0 => return Err("page decode: reader returned no batches".to_string()),
+        1 => arrays.pop().expect("len checked"),
+        _ => {
+            let refs: Vec<&dyn Array> = arrays.iter().map(|a| a.as_ref()).collect();
+            arrow::compute::concat(&refs)
+                .map_err(|e| format!("page decode: failed to concat batches: {}", e))?
+        }
+    };
+    if array.len() != num_rows {
+        return Err(format!(
+            "page decode: expected {} rows but decoded {}",
+            num_rows,
+            array.len()
+        ));
+    }
+    // Hydrate a DictionaryArray to its value type (see doc comment).
+    if let ArrowDataType::Dictionary(_, value_type) = array.data_type() {
+        let value_type = value_type.as_ref().clone();
+        return arrow::compute::cast(&array, &value_type)
+            .map_err(|e| format!("page decode: failed to hydrate dictionary column: {}", e));
+    }
+    Ok(array)
 }
 
-/// Expands dense non-null BYTE_ARRAY values into a per-row slice vector (null
-/// rows map to an empty slice).
-fn expand_bytes<'a>(presence: &[bool], dense: &'a [parquet::data_type::ByteArray]) -> Vec<&'a [u8]> {
-    let mut out: Vec<&[u8]> = Vec::with_capacity(presence.len());
-    let mut di = 0usize;
-    for &present in presence {
-        if present {
-            out.push(dense[di].data());
-            di += 1;
-        } else {
-            out.push(&[]);
+/// Converts a decoded primitive arrow array into the codec's wire form: per-row
+/// raw `i64` bits (null slots hold 0) + per-row presence flags from the array's
+/// null buffer. Bit conventions match the old def-level decode path exactly:
+/// INT32-backed values sign-extend, FLOAT is `f32::to_bits` zero-extended,
+/// DOUBLE is `f64::to_bits`, BOOL is 0/1, and date/time/timestamp logical
+/// types pass through as their raw INT32/INT64 physical values.
+fn arrow_primitive_to_page(array: &ArrayRef) -> Result<(Vec<i64>, Vec<bool>), String> {
+    use arrow::array::AsArray;
+    use arrow::datatypes as adt;
+    use arrow::datatypes::ArrowPrimitiveType;
+
+    fn conv<T: ArrowPrimitiveType>(
+        array: &ArrayRef,
+        to_bits: impl Fn(T::Native) -> i64,
+    ) -> (Vec<i64>, Vec<bool>) {
+        let a = array.as_primitive::<T>();
+        let mut longs = Vec::with_capacity(a.len());
+        let mut presence = Vec::with_capacity(a.len());
+        for i in 0..a.len() {
+            if a.is_valid(i) {
+                longs.push(to_bits(a.value(i)));
+                presence.push(true);
+            } else {
+                longs.push(0);
+                presence.push(false);
+            }
         }
+        (longs, presence)
     }
-    out
+
+    let out = match array.data_type() {
+        ArrowDataType::Boolean => {
+            let a = array.as_boolean();
+            let mut longs = Vec::with_capacity(a.len());
+            let mut presence = Vec::with_capacity(a.len());
+            for i in 0..a.len() {
+                if a.is_valid(i) {
+                    longs.push(if a.value(i) { 1 } else { 0 });
+                    presence.push(true);
+                } else {
+                    longs.push(0);
+                    presence.push(false);
+                }
+            }
+            (longs, presence)
+        }
+        ArrowDataType::Int8 => conv::<adt::Int8Type>(array, |v| v as i64),
+        ArrowDataType::Int16 => conv::<adt::Int16Type>(array, |v| v as i64),
+        ArrowDataType::Int32 => conv::<adt::Int32Type>(array, |v| v as i64),
+        ArrowDataType::Int64 => conv::<adt::Int64Type>(array, |v| v),
+        // Unsigned types are stored as their signed physical INT32/INT64
+        // counterparts; reinterpret through the signed type so the raw bits
+        // match what the old physical-value path produced.
+        ArrowDataType::UInt8 => conv::<adt::UInt8Type>(array, |v| v as i64),
+        ArrowDataType::UInt16 => conv::<adt::UInt16Type>(array, |v| v as i64),
+        ArrowDataType::UInt32 => conv::<adt::UInt32Type>(array, |v| (v as i32) as i64),
+        ArrowDataType::UInt64 => conv::<adt::UInt64Type>(array, |v| v as i64),
+        ArrowDataType::Float32 => conv::<adt::Float32Type>(array, |v| v.to_bits() as i64),
+        ArrowDataType::Float64 => conv::<adt::Float64Type>(array, |v| v.to_bits() as i64),
+        // Date/time/timestamp logical types: raw physical INT32/INT64 passthrough.
+        ArrowDataType::Date32 => conv::<adt::Date32Type>(array, |v| v as i64),
+        ArrowDataType::Date64 => conv::<adt::Date64Type>(array, |v| v),
+        ArrowDataType::Time32(adt::TimeUnit::Second) => {
+            conv::<adt::Time32SecondType>(array, |v| v as i64)
+        }
+        ArrowDataType::Time32(adt::TimeUnit::Millisecond) => {
+            conv::<adt::Time32MillisecondType>(array, |v| v as i64)
+        }
+        ArrowDataType::Time64(adt::TimeUnit::Microsecond) => {
+            conv::<adt::Time64MicrosecondType>(array, |v| v)
+        }
+        ArrowDataType::Time64(adt::TimeUnit::Nanosecond) => {
+            conv::<adt::Time64NanosecondType>(array, |v| v)
+        }
+        ArrowDataType::Timestamp(adt::TimeUnit::Second, _) => {
+            conv::<adt::TimestampSecondType>(array, |v| v)
+        }
+        ArrowDataType::Timestamp(adt::TimeUnit::Millisecond, _) => {
+            conv::<adt::TimestampMillisecondType>(array, |v| v)
+        }
+        ArrowDataType::Timestamp(adt::TimeUnit::Microsecond, _) => {
+            conv::<adt::TimestampMicrosecondType>(array, |v| v)
+        }
+        ArrowDataType::Timestamp(adt::TimeUnit::Nanosecond, _) => {
+            conv::<adt::TimestampNanosecondType>(array, |v| v)
+        }
+        ArrowDataType::Duration(adt::TimeUnit::Second) => {
+            conv::<adt::DurationSecondType>(array, |v| v)
+        }
+        ArrowDataType::Duration(adt::TimeUnit::Millisecond) => {
+            conv::<adt::DurationMillisecondType>(array, |v| v)
+        }
+        ArrowDataType::Duration(adt::TimeUnit::Microsecond) => {
+            conv::<adt::DurationMicrosecondType>(array, |v| v)
+        }
+        ArrowDataType::Duration(adt::TimeUnit::Nanosecond) => {
+            conv::<adt::DurationNanosecondType>(array, |v| v)
+        }
+        other => {
+            return Err(format!(
+                "page decode: unsupported arrow type {:?} for primitive column",
+                other
+            ))
+        }
+    };
+    Ok(out)
 }
 
-/// Expands dense non-null FIXED_LEN_BYTE_ARRAY values into a per-row slice vector.
-fn expand_flba<'a>(
-    presence: &[bool],
-    dense: &'a [parquet::data_type::FixedLenByteArray],
-) -> Vec<&'a [u8]> {
-    let mut out: Vec<&[u8]> = Vec::with_capacity(presence.len());
-    let mut di = 0usize;
-    for &present in presence {
-        if present {
-            out.push(dense[di].data());
-            di += 1;
-        } else {
-            out.push(&[]);
+/// Converts a decoded BYTE_ARRAY/FIXED_LEN_BYTE_ARRAY arrow array into per-row
+/// byte slices (null rows map to an empty slice, matching the old expand path)
+/// + per-row presence flags from the array's null buffer.
+fn arrow_bytes_to_page(array: &ArrayRef) -> Result<(Vec<&[u8]>, Vec<bool>), String> {
+    use arrow::array::AsArray;
+
+    fn conv<'a>(
+        len: usize,
+        is_valid: impl Fn(usize) -> bool,
+        value: impl Fn(usize) -> &'a [u8],
+    ) -> (Vec<&'a [u8]>, Vec<bool>) {
+        let mut slices: Vec<&[u8]> = Vec::with_capacity(len);
+        let mut presence = Vec::with_capacity(len);
+        for i in 0..len {
+            if is_valid(i) {
+                slices.push(value(i));
+                presence.push(true);
+            } else {
+                slices.push(&[]);
+                presence.push(false);
+            }
         }
+        (slices, presence)
     }
-    out
+
+    let out = match array.data_type() {
+        ArrowDataType::Utf8 => {
+            let a = array.as_string::<i32>();
+            conv(a.len(), |i| a.is_valid(i), |i| a.value(i).as_bytes())
+        }
+        ArrowDataType::LargeUtf8 => {
+            let a = array.as_string::<i64>();
+            conv(a.len(), |i| a.is_valid(i), |i| a.value(i).as_bytes())
+        }
+        ArrowDataType::Utf8View => {
+            let a = array.as_string_view();
+            conv(a.len(), |i| a.is_valid(i), |i| a.value(i).as_bytes())
+        }
+        ArrowDataType::Binary => {
+            let a = array.as_binary::<i32>();
+            conv(a.len(), |i| a.is_valid(i), |i| a.value(i))
+        }
+        ArrowDataType::LargeBinary => {
+            let a = array.as_binary::<i64>();
+            conv(a.len(), |i| a.is_valid(i), |i| a.value(i))
+        }
+        ArrowDataType::BinaryView => {
+            let a = array.as_binary_view();
+            conv(a.len(), |i| a.is_valid(i), |i| a.value(i))
+        }
+        ArrowDataType::FixedSizeBinary(_) => {
+            let a = array.as_fixed_size_binary();
+            conv(a.len(), |i| a.is_valid(i), |i| a.value(i))
+        }
+        other => {
+            return Err(format!(
+                "page decode: unsupported arrow type {:?} for byte-array column",
+                other
+            ))
+        }
+    };
+    Ok(out)
 }
 
 /// Writes a decoded primitive page (per-row raw bits + presence bitset) to the
