@@ -16,6 +16,7 @@ import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.FilterLeafReader;
 import org.apache.lucene.index.IndexOptions;
+import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.SegmentReadState;
@@ -34,11 +35,14 @@ import org.opensearch.parquet.codec.cache.QueryParquetStats;
 import org.opensearch.parquet.codec.cache.RowIdStats;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * A {@link FilterLeafReader} that serves doc values for Parquet-resident fields from a
@@ -103,9 +107,36 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
     }
 
     /**
+     * Cached result of the wrap decision for one (segment core, mapping) pair: either "don't wrap"
+     * ({@link #NO_WRAP}) or the synthesized field set + merged FieldInfos to wrap with. Segments are
+     * immutable, so for a fixed mapping the synthesis output never changes for a given core.
+     */
+    private record WrapPlan(Path parquetFile, Map<String, FieldInfo> parquetFields, FieldInfos mergedFieldInfos) {
+    }
+
+    /** Sentinel for "this segment needs no wrapping under this mapping". */
+    private static final WrapPlan NO_WRAP = new WrapPlan(null, Map.of(), null);
+
+    /**
+     * Wrap-plan cache keyed by the segment's core cache key. The plan additionally depends on the
+     * mapping, so the value stores the DocumentMapper identity it was computed against and is
+     * recomputed after a mapping update (new DocumentMapper instance). Entries are evicted by the
+     * core's close listener, mirroring how Lucene/OpenSearch key per-segment caches.
+     */
+    private static final Map<IndexReader.CacheKey, CachedWrapPlan> WRAP_PLANS = new ConcurrentHashMap<>();
+
+    private record CachedWrapPlan(Object mapperIdentity, WrapPlan plan) {
+    }
+
+    /**
      * Builds a {@link ParquetDocValuesLeafReader} for {@code in} if a Parquet file resolves for the
      * segment and the mapping declares at least one Parquet-codec-supported field that is missing
      * doc values in the Lucene segment. Otherwise returns {@code in} unwrapped.
+     *
+     * <p>The decision (Parquet file resolution + mapping walk + FieldInfo synthesis) is computed
+     * once per (segment core, mapping) and cached: segments are immutable and the mapping walk's
+     * inputs are fully determined by the segment's FieldInfos and the current DocumentMapper, so
+     * repeat searcher acquisitions reuse the plan instead of re-scanning the directory and mapping.
      */
     public static LeafReader wrapIfApplicable(LeafReader in, MapperService mapperService, QueryParquetStats queryStats)
         throws IOException {
@@ -124,9 +155,47 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
             IOContext.DEFAULT
         );
 
-        // Only proceed if a Parquet file exists for this segment.
-        if (ParquetSegmentLayout.resolve(state) == null) {
+        // Mapping identity: DocumentMapper is replaced wholesale on mapping update, so instance
+        // identity is a correct and cheap "mapping unchanged" signal. Null mapper (tests) -> no cache.
+        Object mapperIdentity = mapperService != null ? mapperService.documentMapper() : null;
+        IndexReader.CacheHelper coreHelper = in.getCoreCacheHelper();
+
+        WrapPlan plan;
+        if (coreHelper == null || mapperIdentity == null) {
+            plan = computeWrapPlan(in, state, mapperService);
+        } else {
+            IndexReader.CacheKey coreKey = coreHelper.getKey();
+            CachedWrapPlan cached = WRAP_PLANS.get(coreKey);
+            if (cached == null || cached.mapperIdentity() != mapperIdentity) {
+                plan = computeWrapPlan(in, state, mapperService);
+                if (WRAP_PLANS.put(coreKey, new CachedWrapPlan(mapperIdentity, plan)) == null) {
+                    // First insert for this core: evict when the segment core closes.
+                    coreHelper.addClosedListener(WRAP_PLANS::remove);
+                }
+            } else {
+                plan = cached.plan();
+            }
+        }
+
+        if (plan == NO_WRAP) {
             return in;
+        }
+        return new ParquetDocValuesLeafReader(
+            in,
+            mapperService,
+            state,
+            plan.parquetFields(),
+            plan.mergedFieldInfos(),
+            queryStats
+        );
+    }
+
+    /** Uncached wrap decision: resolve the Parquet file, walk the mapping, synthesize FieldInfos. */
+    private static WrapPlan computeWrapPlan(LeafReader in, SegmentReadState state, MapperService mapperService) throws IOException {
+        // Only proceed if a Parquet file exists for this segment.
+        Path parquetFile = ParquetSegmentLayout.resolve(state);
+        if (parquetFile == null) {
+            return NO_WRAP;
         }
 
         FieldInfos existing = in.getFieldInfos();
@@ -167,11 +236,11 @@ public final class ParquetDocValuesLeafReader extends FilterLeafReader {
 
         if (parquetFields.isEmpty()) {
             // Nothing for us to serve — don't wrap.
-            return in;
+            return NO_WRAP;
         }
 
         FieldInfos mergedInfos = new FieldInfos(merged.toArray(new FieldInfo[0]));
-        return new ParquetDocValuesLeafReader(in, mapperService, state, parquetFields, mergedInfos, queryStats);
+        return new WrapPlan(parquetFile, Collections.unmodifiableMap(parquetFields), mergedInfos);
     }
 
     /** Builds a synthetic doc-values {@link FieldInfo} carrying the given DV type. */
