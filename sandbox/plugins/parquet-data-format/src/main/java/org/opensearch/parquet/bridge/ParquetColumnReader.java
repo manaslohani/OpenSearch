@@ -24,6 +24,9 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * FFM wrapper over a single native Parquet column-reader handle, and the owner of that
@@ -66,6 +69,43 @@ public final class ParquetColumnReader implements Closeable {
 
     /** Nanoseconds in the native {@code openColumnReader} FFM call; flushed when query stats attach. */
     private long openNanos;
+
+    // ── Prefetch state ──
+    // Shared daemon executor (2 threads); bounded because each decode is ~100µs — more threads
+    // would just contend on the per-handle mutex. Daemon so plugin reload doesn't hang.
+    private static final ExecutorService PREFETCH_EXECUTOR = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "parquet-dv-prefetch");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /** Page index of the last decoded page (for sequential detection). -1 = no previous decode. */
+    private int lastDecodedPageIdx = -1;
+    /** Whether the access pattern is detected as sequential (at least two consecutive page misses). */
+    private boolean sequential;
+    /** In-flight prefetch; null when idle. */
+    private Future<PageCache> pendingPrefetch;
+    /** The page index the pending prefetch is decoding. -1 if none. */
+    private int prefetchPageIdx = -1;
+    /**
+     * Ping-pong buffer generation per lane. Within each lane the generation flips per decode
+     * so a value segment retained zero-copy by the live {@link PageCache} is not overwritten
+     * by that lane's next decode while it is still being read. Two generations suffice: at
+     * most one page per lane is live at a time (one adopted cache + one in-flight prefetch).
+     */
+    private int queryGen;
+    private int prefetchGen;
+
+    /**
+     * Dedicated buffer pool for the prefetch thread. Critical: {@link BufferPool} holds an
+     * unsynchronized {@code HashMap} and (re)allocates from its Arena on growth — so the query
+     * thread and prefetch thread must NEVER call into the same pool concurrently, or the map
+     * resize races and a lookup returns the wrong segment (observed as non-deterministic decoded
+     * values). Isolating the prefetch to its own pool removes all shared mutable state; the
+     * adopted PageCache's segment is only ever read cross-thread, which the shared Arena allows.
+     * Lazily created (only sequential scans prefetch) and closed with the reader.
+     */
+    private volatile BufferPool prefetchPool;
 
     private ParquetColumnReader(long handle, Path file, String column, ParquetPhysicalType type, boolean repeated, BufferPool bufferPool) {
         this.handle = handle;
@@ -321,6 +361,10 @@ public final class ParquetColumnReader implements Closeable {
      * Loads the page that contains global {@code row} into the cache (Layer 1/2), applying
      * the Layer 4 all-nulls skip first. On an all-nulls page the cache is set to {@code null}
      * and no decode happens. Single-valued columns only; repeated columns use the slow path.
+     *
+     * <p><b>Prefetch:</b> when access is sequential, the previous call's decode kicked off an
+     * async prefetch of the next page. If that prefetch covers this row, it's adopted directly
+     * (zero FFM on this call). Otherwise the prefetch result is discarded and a sync decode runs.
      */
     public void loadPageContaining(long row) throws IOException {
         ensureOpen();
@@ -331,31 +375,132 @@ public final class ParquetColumnReader implements Closeable {
             throw new IOException("loadPageContaining: row " + row + " out of range (rows " + pageIndex.totalRows() + ")");
         }
         if (pageIndex.isAllNulls(pageIdx)) {
-            // Layer 4 — whole page is null, resolved with no decode.
             stats.allNullPageSkip();
-            cache = null; // Layer 4 — whole page is null, no decode.
+            cache = null;
+            discardPrefetch();
+            updateSequentialState(pageIdx);
             return;
         }
-        // FFM — page decode crossing.
+
+        // Try to adopt a landed prefetch for this page.
+        if (pendingPrefetch != null && prefetchPageIdx == pageIdx) {
+            try {
+                PageCache prefetched = pendingPrefetch.get();
+                if (prefetched != null) {
+                    cache = prefetched;
+                    stats.prefetchHit();
+                    pendingPrefetch = null;
+                    prefetchPageIdx = -1;
+                    updateSequentialState(pageIdx);
+                    submitPrefetchIfSequential(pageIdx);
+                    return;
+                }
+            } catch (Exception e) {
+                logger.debug("[PARQUET_DV_PREFETCH] prefetch failed for page {}: {}", pageIdx, e.getMessage());
+            }
+            pendingPrefetch = null;
+            prefetchPageIdx = -1;
+        } else if (pendingPrefetch != null) {
+            // Prefetch was for a different page — access jumped, discard it.
+            discardPrefetch();
+        }
+
+        // Sync decode — the normal path.
         stats.pageDecode();
         cache = decodePage(row);
+        updateSequentialState(pageIdx);
+        submitPrefetchIfSequential(pageIdx);
     }
 
+    private void updateSequentialState(int pageIdx) {
+        sequential = (lastDecodedPageIdx >= 0 && pageIdx == lastDecodedPageIdx + 1);
+        lastDecodedPageIdx = pageIdx;
+    }
+
+    private void submitPrefetchIfSequential(int currentPageIdx) {
+        if (sequential == false) {
+            return;
+        }
+        int nextPageIdx = currentPageIdx + 1;
+        if (nextPageIdx >= pageIndex.pageCount()) {
+            return;
+        }
+        if (pageIndex.isAllNulls(nextPageIdx)) {
+            return;
+        }
+        long nextFirstRow = pageIndex.firstRowOf(nextPageIdx);
+        if (prefetchPool == null) {
+            prefetchPool = new BufferPool();
+        }
+        stats.prefetchSubmitted();
+        prefetchPageIdx = nextPageIdx;
+        pendingPrefetch = PREFETCH_EXECUTOR.submit(() -> {
+            try {
+                return decodePagePrefetch(nextFirstRow);
+            } catch (Exception e) {
+                logger.debug("[PARQUET_DV_PREFETCH] async decode failed: {}", e.getMessage());
+                return null;
+            }
+        });
+    }
+
+    private void discardPrefetch() {
+        if (pendingPrefetch != null) {
+            stats.prefetchWaste();
+            pendingPrefetch.cancel(false);
+            pendingPrefetch = null;
+            prefetchPageIdx = -1;
+        }
+    }
+
+    /**
+     * Decode used by the query thread. Uses buffer slot generation {@code gen} so that a
+     * value segment retained zero-copy by the current {@link PageCache} is never the one the
+     * next (prefetch or sync) decode writes into. The query path and prefetch path also use
+     * disjoint scratch slots (see {@code slot()}), so an in-flight prefetch on the background
+     * thread cannot race the query thread's own out-buffers.
+     */
     private PageCache decodePage(long row) throws IOException {
-        MemorySegment firstRowOut = bufferPool.longOut("firstRow");
-        MemorySegment lastRowOut = bufferPool.longOut("lastRow");
-        MemorySegment valueLenOut = bufferPool.longOut("valueLen");
+        // Ping-pong the query-thread value buffer so this decode does not overwrite the
+        // segment the previous cache (possibly still being read) holds.
+        queryGen ^= 1;
+        return decodePageInto(row, bufferPool, "q", queryGen);
+    }
+
+    /**
+     * Decode used by the prefetch thread. Uses a DEDICATED {@link BufferPool} so it never
+     * touches the query thread's pool concurrently (the pool's HashMap/Arena growth is not
+     * thread-safe). Still ping-pongs its own generation so a prefetched-then-adopted segment
+     * isn't overwritten by the following prefetch while the query thread reads it.
+     */
+    private PageCache decodePagePrefetch(long row) throws IOException {
+        prefetchGen ^= 1;
+        return decodePageInto(row, prefetchPool, "p", prefetchGen);
+    }
+
+    /** Per-purpose, per-lane, per-generation slot name — guarantees no two live pages collide. */
+    private String slot(String lane, int gen, String purpose) {
+        return purpose + ":" + lane + gen + ":" + column;
+    }
+
+    private PageCache decodePageInto(long row, BufferPool pool, String lane, int gen) throws IOException {
+        MemorySegment firstRowOut = pool.longOut(slot(lane, gen, "firstRow"));
+        MemorySegment lastRowOut = pool.longOut(slot(lane, gen, "lastRow"));
+        MemorySegment valueLenOut = pool.longOut(slot(lane, gen, "valueLen"));
+        String valueSlot = slot(lane, gen, "pageValue");
 
         // Size the page from the index so the first attempt usually fits.
         int pageIdx = pageIndex.pageForRow(row);
         int rows = (int) pageIndex.numRowsOf(pageIdx);
         int presenceWords = (rows + 63) >>> 6;
 
+        String offsetsSlot = slot(lane, gen, "pageOffsets");
+        String presenceSlot = slot(lane, gen, "pagePresence");
         long valueCap = (long) rows * ValueLayout.JAVA_LONG.byteSize();
         long offsetsCap = type.isPrimitive() ? 0 : (rows + 1);
-        MemorySegment valueBuf = bufferPool.bytes("pageValue", Math.max(valueCap, 1));
-        MemorySegment offsets = type.isPrimitive() ? MemorySegment.NULL : bufferPool.ints("pageOffsets", offsetsCap);
-        MemorySegment presence = bufferPool.longs("pagePresence", presenceWords);
+        MemorySegment valueBuf = pool.bytes(valueSlot, Math.max(valueCap, 1));
+        MemorySegment offsets = type.isPrimitive() ? MemorySegment.NULL : pool.ints(offsetsSlot, offsetsCap);
+        MemorySegment presence = pool.longs(presenceSlot, presenceWords);
 
         long rc = RustBridge.decodePageAtRow(
             handle,
@@ -381,9 +526,9 @@ public final class ParquetColumnReader implements Closeable {
 
             valueCap = Math.max(requiredValueBytes, 1);
             offsetsCap = type.isPrimitive() ? 0 : (actualRows + 1);
-            valueBuf = bufferPool.bytes("pageValue", valueCap);
-            offsets = type.isPrimitive() ? MemorySegment.NULL : bufferPool.ints("pageOffsets", offsetsCap);
-            presence = bufferPool.longs("pagePresence", actualPresenceWords);
+            valueBuf = pool.bytes(valueSlot, valueCap);
+            offsets = type.isPrimitive() ? MemorySegment.NULL : pool.ints(offsetsSlot, offsetsCap);
+            presence = pool.longs(presenceSlot, actualPresenceWords);
 
             rc = RustBridge.decodePageAtRow(
                 handle,
@@ -497,6 +642,20 @@ public final class ParquetColumnReader implements Closeable {
     public void close() throws IOException {
         if (handle == CLOSED_HANDLE) {
             return;
+        }
+        // Join any in-flight prefetch before releasing buffers and the native handle — the
+        // prefetch thread may be writing into a shared-arena segment that close() would free.
+        if (pendingPrefetch != null) {
+            try {
+                pendingPrefetch.get();
+            } catch (Exception ignored) {}
+            pendingPrefetch = null;
+            prefetchPageIdx = -1;
+        }
+        // Close the prefetch pool only after its last decode has joined above.
+        if (prefetchPool != null) {
+            prefetchPool.close();
+            prefetchPool = null;
         }
         // Per-query roll-up is handled by registration at open (see setQueryStats); here we only emit
         // the per-column detail at DEBUG for deep dives.

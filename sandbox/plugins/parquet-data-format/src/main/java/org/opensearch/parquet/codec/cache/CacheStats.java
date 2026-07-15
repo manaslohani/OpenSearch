@@ -45,6 +45,11 @@ public final class CacheStats {
     private long slowValueReads;    // parquet_read_value_at_row (single)
     private long slowRepeatedReads; // parquet_read_repeated_at_row
 
+    // Prefetch — async decode of the next sequential page.
+    private long prefetchSubmitted;  // times a prefetch was kicked off
+    private long prefetchHits;       // times the next miss was served by a landed prefetch
+    private long prefetchWaste;      // times a prefetch result was discarded (non-sequential jump)
+
     // Section timings (nanoseconds), to attribute query latency to a specific phase.
     private long pageDecodeNanos;    // time inside the FFM page decode
     private long pageIndexLoadNanos; // time building the Layer 3 ColumnPageIndex at reader open
@@ -93,6 +98,30 @@ public final class CacheStats {
     /** Records an FFM slow-path repeated-value read crossing. */
     public void slowRepeatedRead() {
         slowRepeatedReads++;
+    }
+
+    public void prefetchSubmitted() {
+        prefetchSubmitted++;
+    }
+
+    public void prefetchHit() {
+        prefetchHits++;
+    }
+
+    public void prefetchWaste() {
+        prefetchWaste++;
+    }
+
+    public long prefetchSubmittedCount() {
+        return prefetchSubmitted;
+    }
+
+    public long prefetchHitCount() {
+        return prefetchHits;
+    }
+
+    public long prefetchWasteCount() {
+        return prefetchWaste;
     }
 
     /** Adds elapsed nanoseconds spent inside an FFM page decode. */
@@ -185,6 +214,7 @@ public final class CacheStats {
             Locale.ROOT,
             "L1/2 page-cache: hits=%d misses=%d (hitRate=%.2f%%) | L3 jumpTableLookups=%d | "
                 + "L4 allNullSkips=%d | FFM: pageDecodes=%d slowValueReads=%d slowRepeatedReads=%d (totalCrossings=%d) | "
+                + "prefetch: submitted=%d hits=%d waste=%d | "
                 + "timings(ms): pageDecode=%.1f pageIndexLoad=%.1f slowRead=%.1f | "
                 + "values: present=%d absent=%d",
             pageCacheHits,
@@ -196,6 +226,9 @@ public final class CacheStats {
             slowValueReads,
             slowRepeatedReads,
             ffmCrossings(),
+            prefetchSubmitted,
+            prefetchHits,
+            prefetchWaste,
             pageDecodeNanos / 1_000_000.0,
             pageIndexLoadNanos / 1_000_000.0,
             slowReadNanos / 1_000_000.0,

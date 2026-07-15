@@ -47,7 +47,11 @@ public final class BufferPool implements AutoCloseable {
         long capacity;
     }
 
-    private final Arena arena = Arena.ofConfined();
+    // Shared arena allows a prefetch thread to allocate/write segments while the query thread
+    // reads from a previously decoded page. Access checks are slightly costlier than confined
+    // but enable decode overlap. close() is deterministic: callers must join any in-flight
+    // prefetch before calling close (shared-arena close throws if any segment is mid-access).
+    private final Arena arena = Arena.ofShared();
     private final Map<String, Slot> slots = new HashMap<>();
     private boolean closed;
 

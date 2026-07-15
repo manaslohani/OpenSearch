@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::slice;
 use std::str;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use lazy_static::lazy_static;
 use native_bridge_common::{ffm_safe, log_debug};
@@ -1173,21 +1173,43 @@ fn read_record_values<T: ParquetDataType>(
 
 lazy_static! {
     /// Per-handle registry of open column readers, keyed by an opaque i64 handle.
-    /// Mirrors the writer-side handle pattern; serialised behind a single mutex
-    /// since column readers are not shared across threads.
-    static ref COLUMN_READERS: Mutex<HashMap<i64, ColumnReaderState>> = Mutex::new(HashMap::new());
+    /// The outer map is behind a mutex held ONLY for handle lookup/insert/remove;
+    /// each reader's state is behind its own `Arc<Mutex<...>>` so a decode (or a
+    /// background prefetch) on one handle never serialises decodes on another.
+    static ref COLUMN_READERS: Mutex<ColumnReaderRegistry> = Mutex::new(HashMap::new());
 }
+
+/// Registry type: outer map lock for handle bookkeeping, per-handle inner lock
+/// for the reader state itself.
+type ColumnReaderRegistry = HashMap<i64, Arc<Mutex<ColumnReaderState>>>;
 
 /// Monotonic handle allocator. Always `>= 0`, so a returned handle is never
 /// confused with the `< 0` error-pointer convention.
 static NEXT_COLUMN_READER_HANDLE: AtomicI64 = AtomicI64::new(0);
 
-/// Locks the column-reader registry, converting a poisoned mutex into a normal
-/// FFM error instead of propagating the panic.
-fn lock_readers<'a>() -> Result<MutexGuard<'a, HashMap<i64, ColumnReaderState>>, String> {
+/// Locks the column-reader registry (the outer map lock — hold only for handle
+/// lookup/insert/remove, never across IO or decode), converting a poisoned
+/// mutex into a normal FFM error instead of propagating the panic.
+fn lock_registry<'a>() -> Result<MutexGuard<'a, ColumnReaderRegistry>, String> {
     COLUMN_READERS
         .lock()
         .map_err(|_| "column reader registry mutex poisoned".to_string())
+}
+
+/// Resolves `handle` to its state cell, holding the registry lock only for the
+/// `Arc` clone. `ctx` names the calling entry point for the error message.
+fn state_for_handle(handle: i64, ctx: &str) -> Result<Arc<Mutex<ColumnReaderState>>, String> {
+    lock_registry()?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| format!("{}: unknown handle {}", ctx, handle))
+}
+
+/// Locks one column reader's state for the duration of a call, converting a
+/// poisoned mutex into a normal FFM error.
+fn lock_state(cell: &Arc<Mutex<ColumnReaderState>>) -> Result<MutexGuard<'_, ColumnReaderState>, String> {
+    cell.lock()
+        .map_err(|_| "column reader state mutex poisoned".to_string())
 }
 
 /// Opens a per-column reader over `file` for `col`, validating that the column
@@ -1214,7 +1236,7 @@ pub unsafe extern "C" fn parquet_open_column_reader(
     let state = ColumnReaderState::open(&filename, &column, expected_type)?;
 
     let handle = NEXT_COLUMN_READER_HANDLE.fetch_add(1, Ordering::SeqCst);
-    lock_readers()?.insert(handle, state);
+    lock_registry()?.insert(handle, Arc::new(Mutex::new(state)));
     log_debug!(
         "parquet_open_column_reader: file={}, column={}, handle={}",
         filename, column, handle
@@ -1227,7 +1249,7 @@ pub unsafe extern "C" fn parquet_open_column_reader(
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_close_column_reader(handle: i64) -> i64 {
-    match lock_readers()?.remove(&handle) {
+    match lock_registry()?.remove(&handle) {
         Some(_) => {
             log_debug!("parquet_close_column_reader: handle={}", handle);
             Ok(RC_OK)
@@ -1295,10 +1317,8 @@ pub unsafe extern "C" fn parquet_read_value_at_row(
     out_buf_cap: i64,
     out_len: *mut i64,
 ) -> i64 {
-    let mut guard = lock_readers()?;
-    let state = guard
-        .get_mut(&handle)
-        .ok_or_else(|| format!("parquet_read_value_at_row: unknown handle {}", handle))?;
+    let cell = state_for_handle(handle, "parquet_read_value_at_row")?;
+    let state = lock_state(&cell)?;
 
     if row < 0 {
         return Err(format!("parquet_read_value_at_row: negative row {}", row));
@@ -1436,10 +1456,8 @@ pub unsafe extern "C" fn parquet_read_repeated_at_row(
     out_byte_offsets: *mut i64,
     out_byte_buf_cap: i64,
 ) -> i64 {
-    let mut guard = lock_readers()?;
-    let state = guard
-        .get_mut(&handle)
-        .ok_or_else(|| format!("parquet_read_repeated_at_row: unknown handle {}", handle))?;
+    let cell = state_for_handle(handle, "parquet_read_repeated_at_row")?;
+    let state = lock_state(&cell)?;
 
     if row < 0 {
         return Err(format!("parquet_read_repeated_at_row: negative row {}", row));
@@ -1581,10 +1599,8 @@ unsafe fn write_bytes_repeated(
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_get_column_num_pages(handle: i64) -> i64 {
-    let guard = lock_readers()?;
-    let state = guard
-        .get(&handle)
-        .ok_or_else(|| format!("parquet_get_column_num_pages: unknown handle {}", handle))?;
+    let cell = state_for_handle(handle, "parquet_get_column_num_pages")?;
+    let state = lock_state(&cell)?;
     Ok(state.pages.len() as i64)
 }
 
@@ -1617,10 +1633,8 @@ pub unsafe extern "C" fn parquet_get_column_page_index(
     out_buf_capacity: i64,
     out_actual_pages: *mut i64,
 ) -> i64 {
-    let guard = lock_readers()?;
-    let state = guard
-        .get(&handle)
-        .ok_or_else(|| format!("parquet_get_column_page_index: unknown handle {}", handle))?;
+    let cell = state_for_handle(handle, "parquet_get_column_page_index")?;
+    let state = lock_state(&cell)?;
 
     let n = state.pages.len();
     if !out_actual_pages.is_null() {
@@ -1711,10 +1725,8 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
     out_presence_bitset: *mut i64,
     out_presence_bits_cap: i64,
 ) -> i64 {
-    let mut guard = lock_readers()?;
-    let state = guard
-        .get_mut(&handle)
-        .ok_or_else(|| format!("parquet_decode_page_at_row: unknown handle {}", handle))?;
+    let cell = state_for_handle(handle, "parquet_decode_page_at_row")?;
+    let state = lock_state(&cell)?;
 
     if row < 0 || row >= state.row_count {
         return Err(format!(
@@ -1770,7 +1782,7 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
     }
 
     // Liquid miss: decode the whole page via the arrow record-batch reader.
-    let array = decode_page_arrow(state, rg_idx, local_first, num_rows_usize)?;
+    let array = decode_page_arrow(&state, rg_idx, local_first, num_rows_usize)?;
 
     match state.physical_type {
         PhysicalType::BOOLEAN

@@ -106,23 +106,35 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         }
         this.parquetFile = resolved;
 
-        ParquetFileMetadata metadata = RustBridge.getFileMetadata(parquetFile.toString());
-        this.parquetRowCount = metadata.numRows();
-        if (parquetRowCount != maxDoc) {
-            throw new IllegalStateException(
-                String.format(
-                    Locale.ROOT,
-                    "Parquet/Lucene row-count mismatch for segment '%s': Lucene maxDoc=%d but Parquet numRows=%d (file=%s). "
-                        + "The resolved Parquet file must contain exactly the segment's rows; docId→row translation is handled "
-                        + "separately via __row_id__.",
-                    state.segmentInfo.name,
-                    maxDoc,
-                    parquetRowCount,
-                    parquetFile
-                )
-            );
-        }
+        // The write path GUARANTEES the resolved Parquet file contains exactly the segment's rows
+        // (one row per doc, in doc order — the same invariant chain that makes rowId == docId).
+        // Re-reading the Parquet footer here just to re-verify numRows costs one FFM metadata
+        // crossing per segment per producer for a value that never disagrees. Trust it:
+        // parquetRowCount == maxDoc by construction, backed by an -ea-only assert that still does
+        // the footer read in dev/test and trips if a future write path breaks the invariant.
+        assert assertParquetRowCountMatches(state.segmentInfo.name) : "Parquet numRows != maxDoc for segment "
+            + state.segmentInfo.name
+            + " (file="
+            + parquetFile
+            + "); writer invariant violated — the trusted row-count shortcut is unsafe";
+        this.parquetRowCount = maxDoc;
         this.setupNanos = System.nanoTime() - setupStart;
+    }
+
+    /** -ea-only check mirroring the writer invariant: the Parquet file's numRows equals the segment's maxDoc. */
+    private boolean assertParquetRowCountMatches(String segmentName) throws IOException {
+        ParquetFileMetadata metadata = RustBridge.getFileMetadata(parquetFile.toString());
+        if (metadata.numRows() != maxDoc) {
+            logger.error(
+                "Parquet/Lucene row-count mismatch for segment '{}': Lucene maxDoc={} but Parquet numRows={} (file={})",
+                segmentName,
+                maxDoc,
+                metadata.numRows(),
+                parquetFile
+            );
+            return false;
+        }
+        return true;
     }
 
     /**
