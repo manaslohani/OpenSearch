@@ -1790,14 +1790,23 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
         | PhysicalType::INT64
         | PhysicalType::FLOAT
         | PhysicalType::DOUBLE => {
-            let (longs, presence) = arrow_primitive_to_page(&array)?;
-            if let Some(eid) = lc_eid {
-                crate::liquid_page_cache::put_page(eid, &longs, &presence);
+            match lc_eid {
+                // Liquid on: build owned vecs so we can backfill the cache, then write.
+                Some(eid) => {
+                    let (longs, presence) = arrow_primitive_to_page(&array)?;
+                    crate::liquid_page_cache::put_page(eid, &longs, &presence);
+                    write_primitive_page(
+                        &longs, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
+                        out_presence_bitset, out_presence_bits_cap,
+                    )
+                }
+                // Liquid off (codec default): write straight from the arrow array into
+                // the FFM buffers, skipping the intermediate Vec<i64> + Vec<bool>.
+                None => write_primitive_page_from_arrow(
+                    &array, out_value_buf, out_value_buf_cap, out_value_actual_len,
+                    out_presence_bitset, out_presence_bits_cap,
+                ),
             }
-            write_primitive_page(
-                &longs, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
-                out_presence_bitset, out_presence_bits_cap,
-            )
         }
         PhysicalType::BYTE_ARRAY | PhysicalType::FIXED_LEN_BYTE_ARRAY => {
             let (slices, presence) = arrow_bytes_to_page(&array)?;
@@ -2064,6 +2073,263 @@ fn arrow_bytes_to_page(array: &ArrayRef) -> Result<(Vec<&[u8]>, Vec<bool>), Stri
     Ok(out)
 }
 
+/// Fills the presence bitset directly from an arrow array's validity, no
+/// intermediate `Vec<bool>`. No-null arrays fill whole words with all-ones
+/// (last word masked to the row count); otherwise bits are set per valid row.
+/// Caller must have verified `out` holds at least `words` longs.
+unsafe fn write_presence_bits_from_array(array: &ArrayRef, out: *mut i64, words: usize) {
+    let n = array.len();
+    if array.null_count() == 0 {
+        // All present: set every bit, mask the tail of the last word.
+        for w in 0..words {
+            let base = w * 64;
+            let word = if base + 64 <= n {
+                u64::MAX
+            } else {
+                let rem = n - base; // 1..=63
+                (1u64 << rem) - 1
+            };
+            *out.add(w) = word as i64;
+        }
+        return;
+    }
+    for w in 0..words {
+        let mut bits: u64 = 0;
+        let base = w * 64;
+        for b in 0..64 {
+            let idx = base + b;
+            if idx >= n {
+                break;
+            }
+            if array.is_valid(idx) {
+                bits |= 1u64 << b;
+            }
+        }
+        *out.add(w) = bits as i64;
+    }
+}
+
+/// Direct-write primitive page: converts an arrow primitive array into the
+/// codec's wire form (per-row raw `i64` bits + presence bitset) writing STRAIGHT
+/// into the FFM out-buffers, skipping the intermediate `Vec<i64>` + `Vec<bool>`
+/// that `arrow_primitive_to_page` + `write_primitive_page` allocate. Used on the
+/// liquid-off decode path (the codec default); the liquid-on path still builds
+/// the vecs because `put_page` needs owned buffers.
+///
+/// Fast sub-case: when the array is an 8-byte-native primitive
+/// (Int64/Float64/Date64/Time64/Timestamp/Duration) with no nulls, its value
+/// buffer is already `[i64; n]` in native layout (f64 bits are bit-identical to
+/// the `to_bits` path), so the values are `memcpy`'d wholesale. All other types
+/// are written one slot at a time (null rows → 0), matching the bit conventions
+/// of `arrow_primitive_to_page` exactly.
+unsafe fn write_primitive_page_from_arrow(
+    array: &ArrayRef,
+    out_value_buf: *mut u8,
+    out_value_buf_cap: i64,
+    out_value_actual_len: *mut i64,
+    out_presence_bitset: *mut i64,
+    out_presence_bits_cap: i64,
+) -> Result<i64, String> {
+    use arrow::array::AsArray;
+    use arrow::datatypes as adt;
+    use arrow::datatypes::ArrowPrimitiveType;
+
+    let n = array.len();
+    let value_bytes = (n * 8) as i64;
+    if !out_value_actual_len.is_null() {
+        *out_value_actual_len = value_bytes;
+    }
+    let presence_words = ((n + 63) / 64) as i64;
+    if value_bytes > out_value_buf_cap
+        || (n > 0 && out_value_buf.is_null())
+        || presence_words > out_presence_bits_cap
+        || out_presence_bitset.is_null()
+    {
+        return Ok(RC_OVERFLOW);
+    }
+
+    write_presence_bits_from_array(array, out_presence_bitset, presence_words as usize);
+
+    // --- memcpy fast path: 8-byte-native, no nulls ---
+    let dt = array.data_type();
+    let src8: Option<*const u8> = if array.null_count() == 0 {
+        match dt {
+            ArrowDataType::Int64 => {
+                Some(array.as_primitive::<adt::Int64Type>().values().as_ptr() as *const u8)
+            }
+            ArrowDataType::Float64 => {
+                Some(array.as_primitive::<adt::Float64Type>().values().as_ptr() as *const u8)
+            }
+            ArrowDataType::Date64 => {
+                Some(array.as_primitive::<adt::Date64Type>().values().as_ptr() as *const u8)
+            }
+            ArrowDataType::Time64(adt::TimeUnit::Microsecond) => Some(
+                array
+                    .as_primitive::<adt::Time64MicrosecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            ArrowDataType::Time64(adt::TimeUnit::Nanosecond) => Some(
+                array
+                    .as_primitive::<adt::Time64NanosecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            ArrowDataType::Timestamp(adt::TimeUnit::Second, _) => Some(
+                array
+                    .as_primitive::<adt::TimestampSecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            ArrowDataType::Timestamp(adt::TimeUnit::Millisecond, _) => Some(
+                array
+                    .as_primitive::<adt::TimestampMillisecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            ArrowDataType::Timestamp(adt::TimeUnit::Microsecond, _) => Some(
+                array
+                    .as_primitive::<adt::TimestampMicrosecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            ArrowDataType::Timestamp(adt::TimeUnit::Nanosecond, _) => Some(
+                array
+                    .as_primitive::<adt::TimestampNanosecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            ArrowDataType::Duration(adt::TimeUnit::Second) => Some(
+                array
+                    .as_primitive::<adt::DurationSecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            ArrowDataType::Duration(adt::TimeUnit::Millisecond) => Some(
+                array
+                    .as_primitive::<adt::DurationMillisecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            ArrowDataType::Duration(adt::TimeUnit::Microsecond) => Some(
+                array
+                    .as_primitive::<adt::DurationMicrosecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            ArrowDataType::Duration(adt::TimeUnit::Nanosecond) => Some(
+                array
+                    .as_primitive::<adt::DurationNanosecondType>()
+                    .values()
+                    .as_ptr() as *const u8,
+            ),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(src) = src8 {
+        if n > 0 {
+            std::ptr::copy_nonoverlapping(src, out_value_buf, n * 8);
+        }
+        return Ok(RC_OK);
+    }
+
+    // --- one-pass write for widening / bit-packed / null-bearing types ---
+    // Writes every slot (null rows → 0) as native-endian i64 bytes; out_value_buf
+    // has no alignment guarantee so we copy bytes rather than store through *mut i64.
+    unsafe fn put_slot(out: *mut u8, i: usize, v: i64) {
+        std::ptr::copy_nonoverlapping(v.to_ne_bytes().as_ptr(), out.add(i * 8), 8);
+    }
+    fn one_pass<T: ArrowPrimitiveType>(
+        array: &ArrayRef,
+        out: *mut u8,
+        to_bits: impl Fn(T::Native) -> i64,
+    ) {
+        use arrow::array::AsArray;
+        let a = array.as_primitive::<T>();
+        for i in 0..a.len() {
+            let v = if a.is_valid(i) {
+                to_bits(a.value(i))
+            } else {
+                0
+            };
+            unsafe { put_slot(out, i, v) };
+        }
+    }
+
+    match dt {
+        ArrowDataType::Boolean => {
+            let a = array.as_boolean();
+            for i in 0..a.len() {
+                let v = if a.is_valid(i) && a.value(i) { 1 } else { 0 };
+                put_slot(out_value_buf, i, v);
+            }
+        }
+        ArrowDataType::Int8 => one_pass::<adt::Int8Type>(array, out_value_buf, |v| v as i64),
+        ArrowDataType::Int16 => one_pass::<adt::Int16Type>(array, out_value_buf, |v| v as i64),
+        ArrowDataType::Int32 => one_pass::<adt::Int32Type>(array, out_value_buf, |v| v as i64),
+        ArrowDataType::Int64 => one_pass::<adt::Int64Type>(array, out_value_buf, |v| v),
+        ArrowDataType::UInt8 => one_pass::<adt::UInt8Type>(array, out_value_buf, |v| v as i64),
+        ArrowDataType::UInt16 => one_pass::<adt::UInt16Type>(array, out_value_buf, |v| v as i64),
+        ArrowDataType::UInt32 => {
+            one_pass::<adt::UInt32Type>(array, out_value_buf, |v| (v as i32) as i64)
+        }
+        ArrowDataType::UInt64 => one_pass::<adt::UInt64Type>(array, out_value_buf, |v| v as i64),
+        ArrowDataType::Float32 => {
+            one_pass::<adt::Float32Type>(array, out_value_buf, |v| v.to_bits() as i64)
+        }
+        ArrowDataType::Float64 => {
+            one_pass::<adt::Float64Type>(array, out_value_buf, |v| v.to_bits() as i64)
+        }
+        ArrowDataType::Date32 => one_pass::<adt::Date32Type>(array, out_value_buf, |v| v as i64),
+        ArrowDataType::Date64 => one_pass::<adt::Date64Type>(array, out_value_buf, |v| v),
+        ArrowDataType::Time32(adt::TimeUnit::Second) => {
+            one_pass::<adt::Time32SecondType>(array, out_value_buf, |v| v as i64)
+        }
+        ArrowDataType::Time32(adt::TimeUnit::Millisecond) => {
+            one_pass::<adt::Time32MillisecondType>(array, out_value_buf, |v| v as i64)
+        }
+        ArrowDataType::Time64(adt::TimeUnit::Microsecond) => {
+            one_pass::<adt::Time64MicrosecondType>(array, out_value_buf, |v| v)
+        }
+        ArrowDataType::Time64(adt::TimeUnit::Nanosecond) => {
+            one_pass::<adt::Time64NanosecondType>(array, out_value_buf, |v| v)
+        }
+        ArrowDataType::Timestamp(adt::TimeUnit::Second, _) => {
+            one_pass::<adt::TimestampSecondType>(array, out_value_buf, |v| v)
+        }
+        ArrowDataType::Timestamp(adt::TimeUnit::Millisecond, _) => {
+            one_pass::<adt::TimestampMillisecondType>(array, out_value_buf, |v| v)
+        }
+        ArrowDataType::Timestamp(adt::TimeUnit::Microsecond, _) => {
+            one_pass::<adt::TimestampMicrosecondType>(array, out_value_buf, |v| v)
+        }
+        ArrowDataType::Timestamp(adt::TimeUnit::Nanosecond, _) => {
+            one_pass::<adt::TimestampNanosecondType>(array, out_value_buf, |v| v)
+        }
+        ArrowDataType::Duration(adt::TimeUnit::Second) => {
+            one_pass::<adt::DurationSecondType>(array, out_value_buf, |v| v)
+        }
+        ArrowDataType::Duration(adt::TimeUnit::Millisecond) => {
+            one_pass::<adt::DurationMillisecondType>(array, out_value_buf, |v| v)
+        }
+        ArrowDataType::Duration(adt::TimeUnit::Microsecond) => {
+            one_pass::<adt::DurationMicrosecondType>(array, out_value_buf, |v| v)
+        }
+        ArrowDataType::Duration(adt::TimeUnit::Nanosecond) => {
+            one_pass::<adt::DurationNanosecondType>(array, out_value_buf, |v| v)
+        }
+        other => {
+            return Err(format!(
+                "page decode: unsupported arrow type {:?} for primitive column",
+                other
+            ))
+        }
+    }
+    Ok(RC_OK)
+}
+
 /// Writes a decoded primitive page (per-row raw bits + presence bitset) to the
 /// caller buffers, or returns `RC_OVERFLOW` after recording the required value
 /// byte length.
@@ -2148,4 +2414,83 @@ unsafe fn write_bytes_page(
 
     write_presence_bitset(presence, out_presence_bitset, out_presence_bits_cap);
     Ok(RC_OK)
+}
+
+#[cfg(test)]
+mod direct_write_tests {
+    use super::*;
+    use arrow::array::{BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array};
+
+    /// The direct-write path (`write_primitive_page_from_arrow`, used when liquid is off)
+    /// must produce byte-identical value + presence buffers to the reference
+    /// `arrow_primitive_to_page` + `write_primitive_page` path (used when liquid is on).
+    #[test]
+    fn direct_write_matches_reference() {
+        fn reference(array: &ArrayRef) -> (Vec<u8>, Vec<i64>) {
+            let (longs, presence) = arrow_primitive_to_page(array).unwrap();
+            let vbytes = longs.len() * 8;
+            let pwords = (presence.len() + 63) / 64;
+            let mut vbuf = vec![0u8; vbytes.max(1)];
+            let mut pbuf = vec![0i64; pwords.max(1)];
+            let mut len = 0i64;
+            let rc = unsafe {
+                write_primitive_page(
+                    &longs,
+                    &presence,
+                    vbuf.as_mut_ptr(),
+                    vbytes as i64,
+                    &mut len,
+                    pbuf.as_mut_ptr(),
+                    pwords as i64,
+                )
+            }
+            .unwrap();
+            assert_eq!(rc, RC_OK);
+            (vbuf, pbuf)
+        }
+        fn direct(array: &ArrayRef) -> (Vec<u8>, Vec<i64>) {
+            let vbytes = array.len() * 8;
+            let pwords = (array.len() + 63) / 64;
+            let mut vbuf = vec![0u8; vbytes.max(1)];
+            let mut pbuf = vec![0i64; pwords.max(1)];
+            let mut len = 0i64;
+            let rc = unsafe {
+                write_primitive_page_from_arrow(
+                    array,
+                    vbuf.as_mut_ptr(),
+                    vbytes as i64,
+                    &mut len,
+                    pbuf.as_mut_ptr(),
+                    pwords as i64,
+                )
+            }
+            .unwrap();
+            assert_eq!(rc, RC_OK);
+            (vbuf, pbuf)
+        }
+        let cases: Vec<ArrayRef> = vec![
+            // memcpy fast path: Int64/Float64 no nulls
+            Arc::new(Int64Array::from(vec![Some(1), Some(-2), Some(i64::MAX), Some(0)])),
+            Arc::new(Float64Array::from(vec![Some(2.25), Some(-1.5), Some(0.0)])),
+            // nulls force the per-slot path
+            Arc::new(Int64Array::from(vec![Some(7), None, Some(8), None, Some(9)])),
+            // widening + sign-extend
+            Arc::new(Int32Array::from(vec![Some(-1), Some(42), None])),
+            // float bits with a null
+            Arc::new(Float32Array::from(vec![Some(-1.5f32), None])),
+            // bool 0/1
+            Arc::new(BooleanArray::from(vec![Some(true), Some(false), None])),
+            // >64 rows to exercise multi-word presence + tail masking
+            Arc::new(Int64Array::from(
+                (0..100)
+                    .map(|i| if i % 7 == 0 { None } else { Some(i as i64) })
+                    .collect::<Vec<_>>(),
+            )),
+            // all-null
+            Arc::new(Int64Array::from(vec![None, None, None])),
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            assert_eq!(reference(c), direct(c), "mismatch on case {}", i);
+        }
+    }
 }
