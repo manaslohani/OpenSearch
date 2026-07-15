@@ -56,6 +56,7 @@ public class RustBridge {
     private static final MethodHandle CLOSE_COLUMN_READER;
     private static final MethodHandle OPEN_COLUMN_READER_COUNT;
     private static final MethodHandle LIQUID_CACHE_SET_ENABLED;
+    private static final MethodHandle LIQUID_CACHE_STATS;
     private static final MethodHandle READ_VALUE_AT_ROW;
     private static final MethodHandle READ_REPEATED_AT_ROW;
     private static final MethodHandle GET_COLUMN_NUM_PAGES;
@@ -327,6 +328,14 @@ public class RustBridge {
                 ValueLayout.JAVA_LONG,   // max_memory_bytes
                 ValueLayout.ADDRESS,     // cache_dir ptr
                 ValueLayout.JAVA_LONG    // cache_dir len
+            )
+        );
+        LIQUID_CACHE_STATS = linker.downcallHandle(
+            lib.find("parquet_liquid_cache_stats").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,   // slots written (3, or 0 on bad args)
+                ValueLayout.ADDRESS,     // out ptr (3 i64 slots)
+                ValueLayout.JAVA_LONG    // out_len
             )
         );
         READ_VALUE_AT_ROW = linker.downcallHandle(
@@ -873,6 +882,23 @@ public class RustBridge {
         try (var call = new NativeCall()) {
             var dir = call.str(cacheDir);
             call.invoke(LIQUID_CACHE_SET_ENABLED, enabled ? 1 : 0, maxMemoryBytes, dir.segment(), dir.len());
+        }
+    }
+
+    /**
+     * Returns the codec liquid page-cache counters {@code [hits, misses, backfills]}, so callers
+     * can confirm the cache is actually serving hits (a "liquid-on" run that is all misses tells
+     * you nothing about the hit path, and a cold run must show {@code hits == 0}). Process-global,
+     * cumulative since JVM start.
+     */
+    public static long[] liquidCacheStats() {
+        try (var call = new NativeCall()) {
+            MemorySegment buf = call.buf(3 * Long.BYTES);
+            long n = call.invoke(LIQUID_CACHE_STATS, buf, 3L);
+            if (n < 3) {
+                return new long[] { 0, 0, 0 };
+            }
+            return buf.toArray(ValueLayout.JAVA_LONG);
         }
     }
 

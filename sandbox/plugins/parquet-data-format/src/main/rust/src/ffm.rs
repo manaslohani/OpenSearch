@@ -1291,6 +1291,24 @@ pub unsafe extern "C" fn parquet_liquid_cache_set_enabled(
     Ok(0)
 }
 
+/// Write the liquid page-cache counters `(hits, misses, backfills)` into `out` (3 i64 slots),
+/// so a benchmark can confirm the cache is actually serving hits (and that a "cold" run has
+/// hits == 0). Returns the number of slots written (3), or 0 if `out` is null or `out_len < 3`.
+///
+/// # Safety
+/// `out` must point to at least `out_len` writable i64 slots.
+#[no_mangle]
+pub unsafe extern "C" fn parquet_liquid_cache_stats(out: *mut i64, out_len: i64) -> i64 {
+    if out.is_null() || out_len < 3 {
+        return 0;
+    }
+    let (hits, misses, backfills) = crate::liquid_page_cache::stats();
+    *out.add(0) = hits as i64;
+    *out.add(1) = misses as i64;
+    *out.add(2) = backfills as i64;
+    3
+}
+
 /// Slow-path single-value read at `row`.
 ///
 /// On success writes:

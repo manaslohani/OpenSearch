@@ -58,6 +58,23 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Configured max memory budget for the cache (bytes). Applied when the cache is first built.
 static MAX_MEMORY_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Observability counters, so a benchmark can confirm the liquid path is actually exercised
+/// (a "liquid-on" run that is all misses tells you nothing about the hit path, and a "cold" run
+/// must show hits == 0). `hits` counts pages served from the cache, `misses` counts lookups that
+/// fell through to decode, `backfills` counts pages inserted after a miss.
+static HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BACKFILLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Snapshot of the cache counters: `(hits, misses, backfills)`.
+pub fn stats() -> (u64, u64, u64) {
+    (
+        HITS.load(Ordering::Relaxed),
+        MISSES.load(Ordering::Relaxed),
+        BACKFILLS.load(Ordering::Relaxed),
+    )
+}
+
 /// Directory under which the liquid `t4` store is mounted, supplied by Java at init (a writable
 /// path derived from the node's data directory — never tmpfs). Empty until `set_enabled` runs.
 static CACHE_DIR: OnceLock<Mutex<String>> = OnceLock::new();
@@ -223,8 +240,22 @@ pub unsafe fn get_page_into_outbuf(
     out_presence_bits_cap: i64,
 ) -> Option<i64> {
     let cache = cache()?;
-    let array: ArrayRef = runtime().block_on(cache.get(&eid).read())?;
-    let int_array = array.as_any().downcast_ref::<Int64Array>()?;
+    let array: ArrayRef = match runtime().block_on(cache.get(&eid).read()) {
+        Some(a) => a,
+        None => {
+            MISSES.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
+    // Only the Int64Array layout is cached (see put_page); a wrong type falls back to decode.
+    let int_array = match array.as_any().downcast_ref::<Int64Array>() {
+        Some(a) => a,
+        None => {
+            MISSES.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
+    HITS.fetch_add(1, Ordering::Relaxed);
     let len = int_array.len();
 
     let value_bytes = (len * 8) as i64;
@@ -308,5 +339,10 @@ pub fn put_page(eid: EntryID, longs: &[i64], presence: &[bool]) {
     let array_ref: ArrayRef = Arc::new(array);
     // Best-effort: a CacheFull error just means this page is not cached this time.
     // `insert`/`get` return builder types that implement `IntoFuture`, so convert before block_on.
-    let _ = runtime().block_on(cache.insert(eid, array_ref).into_future());
+    if runtime()
+        .block_on(cache.insert(eid, array_ref).into_future())
+        .is_ok()
+    {
+        BACKFILLS.fetch_add(1, Ordering::Relaxed);
+    }
 }
