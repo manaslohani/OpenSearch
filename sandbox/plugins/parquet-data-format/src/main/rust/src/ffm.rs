@@ -1779,6 +1779,14 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
     // decoded page from the node-level cache and skips the Parquet decode below entirely; a miss
     // decodes as usual and backfills the cache (see the primitive arms). Keyed by
     // (file, column, page); primitives only. No-op when the feature flag is off.
+    // NOTE (cache-sharing with DataFusion, deferred): to share ONE liquid instance with DF the
+    // keys must match. Two gaps remain, NOT addressed here:
+    //  1. column id: we key by Parquet LEAF index (state.leaf_idx); DF keys by ROOT index.
+    //     They coincide only for fully-flat files. A nested LIST/STRUCT adds extra leaves that
+    //     shift the leaf indices of every following flat column, so even a flat cacheable column
+    //     gets leaf_idx != root_idx. Sharing would require keying by root. Nested fields are
+    //     out of scope for now; revisit before any shared-instance work.
+    //  2. row grid: we key by Parquet page_idx; DF keys by batch_id (row/8192). Also deferred.
     let lc_eid = if crate::liquid_page_cache::enabled() {
         Some(crate::liquid_page_cache::entry_id(
             state.liquid_file_id,
@@ -1789,13 +1797,16 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
         None
     };
     if let Some(eid) = lc_eid {
-        // Serve a cache hit straight into the caller's out-buffers (two memcpys), bypassing the
-        // Vec<i64>+Vec<bool> rebuild that get_page does and its recopy through write_primitive_page.
-        if let Some(rc) = crate::liquid_page_cache::get_page_into_outbuf(
-            eid, out_value_buf, out_value_buf_cap, out_value_actual_len,
-            out_presence_bitset, out_presence_bits_cap,
-        ) {
-            return Ok(rc);
+        // DF-FORMAT EXPERIMENT (branch codec-liquid-df-format): the cache stores the NATIVE
+        // Arrow array (as DataFusion's instance does), not a normalized Int64Array. A hit
+        // therefore returns the native array and we widen it to i64 into the out-buffers via
+        // write_primitive_page_from_arrow (per-row cast), instead of the single memcpy the
+        // Int64Array path (get_page_into_outbuf) allowed. This measures the point-2 read cost.
+        if let Some(array) = crate::liquid_page_cache::get_page_array(eid) {
+            return write_primitive_page_from_arrow(
+                &array, out_value_buf, out_value_buf_cap, out_value_actual_len,
+                out_presence_bitset, out_presence_bits_cap,
+            );
         }
     }
 
@@ -1808,23 +1819,18 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
         | PhysicalType::INT64
         | PhysicalType::FLOAT
         | PhysicalType::DOUBLE => {
-            match lc_eid {
-                // Liquid on: build owned vecs so we can backfill the cache, then write.
-                Some(eid) => {
-                    let (longs, presence) = arrow_primitive_to_page(&array)?;
-                    crate::liquid_page_cache::put_page(eid, &longs, &presence);
-                    write_primitive_page(
-                        &longs, &presence, out_value_buf, out_value_buf_cap, out_value_actual_len,
-                        out_presence_bitset, out_presence_bits_cap,
-                    )
-                }
-                // Liquid off (codec default): write straight from the arrow array into
-                // the FFM buffers, skipping the intermediate Vec<i64> + Vec<bool>.
-                None => write_primitive_page_from_arrow(
-                    &array, out_value_buf, out_value_buf_cap, out_value_actual_len,
-                    out_presence_bitset, out_presence_bits_cap,
-                ),
+            // DF-FORMAT EXPERIMENT (branch codec-liquid-df-format): store the NATIVE decoded
+            // array (as DataFusion does), not a normalized Int64Array. On a liquid-on miss we
+            // backfill the native array and write out by widening it to i64; a later hit
+            // (handled above) also widens on read. Liquid-off is unchanged. This lets an A/B
+            // vs codec-arpit-full isolate the "read DF-format" per-row widen cost (point 2).
+            if let Some(eid) = lc_eid {
+                crate::liquid_page_cache::put_page_native(eid, array.clone());
             }
+            write_primitive_page_from_arrow(
+                &array, out_value_buf, out_value_buf_cap, out_value_actual_len,
+                out_presence_bitset, out_presence_bits_cap,
+            )
         }
         PhysicalType::BYTE_ARRAY | PhysicalType::FIXED_LEN_BYTE_ARRAY => {
             let (slices, presence) = arrow_bytes_to_page(&array)?;

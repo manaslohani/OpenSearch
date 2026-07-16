@@ -346,3 +346,42 @@ pub fn put_page(eid: EntryID, longs: &[i64], presence: &[bool]) {
         BACKFILLS.fetch_add(1, Ordering::Relaxed);
     }
 }
+
+/// Cache a decoded page as its **native** Arrow array (Int32Array, Float64Array, ...),
+/// mimicking how DataFusion's liquid instance stores columns (native type, not normalized
+/// to i64). Paired with [`get_page_array`], which returns the array as-is; the FFM decode
+/// path then widens it to i64 on read via `write_primitive_page_from_arrow`.
+///
+/// This exists to measure the "read DF-format entries" cost: vs [`put_page`] +
+/// [`get_page_into_outbuf`] (store Int64Array, read via one memcpy), this stores the native
+/// type and pays a per-row widen on every read. Comparing the two branches isolates that cost.
+pub fn put_page_native(eid: EntryID, array: ArrayRef) {
+    let cache = match cache() {
+        Some(c) => c,
+        None => return,
+    };
+    if runtime()
+        .block_on(cache.insert(eid, array).into_future())
+        .is_ok()
+    {
+        BACKFILLS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Look up a cached page as its raw native `ArrayRef` (whatever type `put_page_native` stored),
+/// or `None` on a miss. The caller widens it to i64 into the FFM out-buffers via
+/// `write_primitive_page_from_arrow`. Counterpart to [`get_page_into_outbuf`]'s memcpy fast
+/// path, used only on the DF-format (native-storage) branch.
+pub fn get_page_array(eid: EntryID) -> Option<ArrayRef> {
+    let cache = cache()?;
+    match runtime().block_on(cache.get(&eid).read()) {
+        Some(array) => {
+            HITS.fetch_add(1, Ordering::Relaxed);
+            Some(array)
+        }
+        None => {
+            MISSES.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+}
