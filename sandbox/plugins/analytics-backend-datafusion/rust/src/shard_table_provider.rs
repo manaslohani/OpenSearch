@@ -84,6 +84,9 @@ impl TableProvider for ShardTableProvider {
         let num_file_cols = self.config.file_schema.fields().len();
         let partitioned_files: Vec<PartitionedFile> = self.config.files.iter()
             .map(|file_info| {
+                // TEMP-PATHDIFF: log the location string DataFusion registers, to diff against the
+                // codec's Parquet path (ffm.rs [PATHDIFF]). Match => codec can key into DF's shared cache.
+                log::info!("[PATHDIFF] df object_meta.location='{}'", file_info.object_meta.location);
                 let mut pf = PartitionedFile::from(file_info.object_meta.clone());
                 pf.partition_values = vec![ScalarValue::Int64(Some(file_info.row_base))];
                 let file_stats = Arc::new(Statistics {

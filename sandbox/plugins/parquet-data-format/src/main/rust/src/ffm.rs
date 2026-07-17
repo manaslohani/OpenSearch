@@ -909,6 +909,10 @@ struct PageEntry {
 
 impl ColumnReaderState {
     fn open(filename: &str, column: &str, expected_type: i32) -> Result<ColumnReaderState, String> {
+        // TEMP-PATHDIFF: log the codec's Parquet path string so we can diff it against the
+        // string DataFusion registers (shard_table_provider object_meta.location). If they match,
+        // the codec can key into DF's shared cache via register_or_get_file for cross-read.
+        crate::log_info!("[PATHDIFF] codec open path='{}' column='{}'", filename, column);
         let file = File::open(filename).map_err(|e| format!("Failed to open '{}': {}", filename, e))?;
         // Keep a second handle to the same file for the arrow decode path
         // (the first is consumed by `SerializedFileReader`).
