@@ -116,6 +116,20 @@ fn runtime() -> &'static Runtime {
 /// then disables the cache so the decode path continues unaffected. Never panics: a cache problem
 /// must not poison the column-reader mutex or fail doc-values reads.
 fn build_cache() -> Option<Arc<LiquidCache>> {
+    // Prefer the shared instance DataFusion built (hard dep on opensearch-datafusion: the codec
+    // is DataFusion's DSL fallback, so depending on it is the sanctioned direction). Adopting
+    // DF's Arc<LiquidCache> means ONE store + ONE budget across both engines, so a column warmed
+    // by a PPL/DF query is a cache hit for a later DSL/codec query and vice versa. Falls through
+    // to building our own only when DF liquid never initialized (DSL-only node).
+    //
+    // Linux-only: DataFusion's liquid_cache module is #[cfg(target_os = "linux")] (the t4 store
+    // is Linux-only). On other targets the codec always builds its own instance below.
+    #[cfg(target_os = "linux")]
+    if let Some(shared) = opensearch_datafusion::liquid_cache::LiquidOnlyRuntime::cache_ref_globally() {
+        crate::log_info!("liquid_page_cache: adopted shared liquid cache from DataFusion");
+        return Some(shared.storage().clone());
+    }
+
     let dir = CACHE_DIR
         .get()
         .and_then(|m| m.lock().ok().map(|g| g.clone()))

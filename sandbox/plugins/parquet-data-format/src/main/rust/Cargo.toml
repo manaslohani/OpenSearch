@@ -26,6 +26,11 @@ crc32fast = { workspace = true }
 serde_json = { workspace = true }
 liquid-cache = { workspace = true }
 t4 = { workspace = true }
+# Hard dep on the DataFusion engine: the codec is DataFusion's DSL fallback (queries whose
+# RelNode conversion is unsupported route here), so it adopts DF's shared liquid cache instead
+# of building its own. Acyclic — opensearch-datafusion does not depend on parquet-data-format.
+opensearch-datafusion = { path = "../../../../analytics-backend-datafusion/rust" }
+liquid-cache-datafusion = { workspace = true }
 
 [dev-dependencies]
 opensearch-parquet-format = { path = ".", features = ["test-utils"] }
