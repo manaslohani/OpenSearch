@@ -1234,6 +1234,15 @@ pub unsafe extern "C" fn parquet_liquid_cache_set_enabled(
     Ok(0)
 }
 
+/// Clears the codec liquid cache (all decoded pages, in-memory + spilled). Returns 0 on success;
+/// a no-op when the cache is disabled or not yet built. Never consults or blocks the decode path.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn parquet_liquid_cache_clear() -> i64 {
+    crate::liquid_page_cache::clear();
+    Ok(0)
+}
+
 /// Slow-path single-value read at `row`.
 ///
 /// On success writes:

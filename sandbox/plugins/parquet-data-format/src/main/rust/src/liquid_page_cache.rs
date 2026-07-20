@@ -85,6 +85,17 @@ pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+/// Clears all cached decoded pages (the in-memory index and any spilled `t4` entries) without
+/// disabling the cache or tearing down the runtime: resets the liquid index and budget usage, so
+/// subsequent reads re-decode and re-populate. A no-op when the cache is disabled or not yet built.
+/// Never panics — a clear failure must not poison the column-reader mutex or fail doc-values reads.
+pub fn clear() {
+    if let Some(c) = cache() {
+        c.reset();
+        crate::log_info!("liquid_page_cache: cache cleared");
+    }
+}
+
 fn runtime() -> &'static Runtime {
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_current_thread()

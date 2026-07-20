@@ -56,6 +56,7 @@ public class RustBridge {
     private static final MethodHandle CLOSE_COLUMN_READER;
     private static final MethodHandle OPEN_COLUMN_READER_COUNT;
     private static final MethodHandle LIQUID_CACHE_SET_ENABLED;
+    private static final MethodHandle LIQUID_CACHE_CLEAR;
     private static final MethodHandle READ_VALUE_AT_ROW;
     private static final MethodHandle READ_REPEATED_AT_ROW;
     private static final MethodHandle GET_COLUMN_NUM_PAGES;
@@ -328,6 +329,10 @@ public class RustBridge {
                 ValueLayout.ADDRESS,     // cache_dir ptr
                 ValueLayout.JAVA_LONG    // cache_dir len
             )
+        );
+        LIQUID_CACHE_CLEAR = linker.downcallHandle(
+            lib.find("parquet_liquid_cache_clear").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG)   // status (< 0 error pointer)
         );
         READ_VALUE_AT_ROW = linker.downcallHandle(
             lib.find("parquet_read_value_at_row").orElseThrow(),
@@ -874,6 +879,15 @@ public class RustBridge {
             var dir = call.str(cacheDir);
             call.invoke(LIQUID_CACHE_SET_ENABLED, enabled ? 1 : 0, maxMemoryBytes, dir.segment(), dir.len());
         }
+    }
+
+    /**
+     * Clears the codec-owned liquid decoded-page cache (in-memory index + spilled {@code t4} entries)
+     * on this node, without disabling it. A no-op when the cache is disabled or not yet built. Used by
+     * the {@code POST /_plugins/parquet/liquid_cache/_clear} REST action for cold-start benchmarking.
+     */
+    public static void liquidCacheClear() {
+        NativeCall.invokeStatic(LIQUID_CACHE_CLEAR);
     }
 
     /**

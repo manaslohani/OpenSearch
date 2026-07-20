@@ -48,6 +48,7 @@ import org.opensearch.parquet.stats.transport.ParquetNodeStatsActionType;
 import org.opensearch.parquet.stats.transport.ParquetNodeStatsRestAction;
 import org.opensearch.parquet.stats.transport.ParquetNodeStatsTransportAction;
 import org.opensearch.parquet.stats.transport.ParquetStatsActionType;
+import org.opensearch.parquet.rest.ParquetLiquidCacheClearRestAction;
 import org.opensearch.parquet.stats.transport.ParquetStatsRestAction;
 import org.opensearch.parquet.stats.transport.ParquetStatsTransportAction;
 import org.opensearch.parquet.store.ParquetStoreStrategy;
@@ -296,7 +297,7 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin,
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<DiscoveryNodes> nodesInCluster
     ) {
-        return List.of(new ParquetStatsRestAction(), new ParquetNodeStatsRestAction());
+        return List.of(new ParquetStatsRestAction(), new ParquetNodeStatsRestAction(), new ParquetLiquidCacheClearRestAction());
     }
 
     /**
