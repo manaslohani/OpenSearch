@@ -122,9 +122,9 @@ public class CacheStructuresTests extends OpenSearchTestCase {
         PageCache pc = new PageCache();
         pc.firstRow = 4;
         pc.lastRow = 9; // 6 rows
-        pc.values = new long[] { 40, 0, 60, 70, 0, 90 };
+        pc.values = MemorySegment.ofArray(new long[] { 40, 0, 60, 70, 0, 90 });
         // present rows (relative): 0,2,3,5 -> bits 0b101101 = 45
-        pc.presenceBits = new long[] { 0b101101L };
+        pc.presenceBits = MemorySegment.ofArray(new long[] { 0b101101L });
 
         assertEquals(6, pc.rowCount());
         assertTrue(pc.contains(4));
@@ -148,10 +148,11 @@ public class CacheStructuresTests extends OpenSearchTestCase {
         PageCache pc = new PageCache();
         pc.firstRow = 0;
         pc.lastRow = 127; // 128 rows -> 2 presence words
-        pc.presenceBits = new long[2];
+        long[] presenceBits = new long[2];
         // Mark rows 63 and 64 present (straddling the 64-bit word boundary).
-        pc.presenceBits[0] = 1L << 63;
-        pc.presenceBits[1] = 1L;
+        presenceBits[0] = 1L << 63;
+        presenceBits[1] = 1L;
+        pc.presenceBits = MemorySegment.ofArray(presenceBits);
 
         assertFalse(pc.isPresent(62));
         assertTrue(pc.isPresent(63));

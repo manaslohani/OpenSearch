@@ -8,19 +8,26 @@
 
 package org.opensearch.parquet.codec.cache;
 
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+
 /**
  * Layer 1 (page-resident value cache) + Layer 2 (page-resident presence bitset) for a
  * single decoded Parquet page of a single-valued column.
  *
- * <p>Holds the inclusive global row range {@code [firstRow, lastRow]}, the decoded values
- * (raw {@code long} bits for primitives, or a backing byte buffer + CSR offsets for
- * {@code BYTE_ARRAY}), and a packed presence bitset with one bit per row in the page.
- * Iterators serve cache hits with a presence bit-test plus an array index lookup — no FFM
- * call. A single instance per column is resident at a time (sliding window, ascending
- * doc IDs, no LRU).
+ * <p>Holds the inclusive global row range {@code [firstRow, lastRow]} and, for primitive
+ * columns, <b>off-heap views</b> of the decoded values (raw {@code long} bits, one slot per
+ * row) and the packed presence bitset — {@link MemorySegment} slices of the column reader's
+ * rotating {@link BufferPool} slots, served in place with zero on-heap copies. For
+ * {@code BYTE_ARRAY} columns the value bytes are copied to a heap {@code byte[]} + CSR
+ * offsets because Lucene's {@code BytesRef} contract requires a heap array; presence stays
+ * off-heap.
  *
- * <p>This is the task-3 (Layer 1/2) structure; the column-reader wrapper (task 2) populates
- * and owns it, so it is introduced here. Task 3 refines and adds dedicated unit tests.
+ * <p>Iterators serve cache hits with a presence bit-test plus an indexed segment read — no
+ * FFM call, no heap allocation. A single instance per column is resident at a time (sliding
+ * window, ascending doc IDs, no LRU). The backing segments belong to the producer's
+ * {@link BufferPool} arena: they stay valid until the producer closes (grow events replace a
+ * slot's backing segment but never free the old one), and must not be read after close.
  */
 public final class PageCache {
 
@@ -29,16 +36,22 @@ public final class PageCache {
     /** Inclusive global index of the last row in the cached page. */
     public long lastRow;
 
-    /** Decoded raw bits, one slot per row (primitive columns). Null for binary columns. */
-    public long[] values;
+    /**
+     * Off-heap view of the decoded raw bits, one {@code long} slot per row (primitive
+     * columns). Null for binary columns.
+     */
+    public MemorySegment values;
 
     /** Backing byte buffer for binary columns (concatenated value bytes). Null for primitives. */
     public byte[] byteBuf;
     /** CSR offsets into {@link #byteBuf}, length {@code rowsInPage + 1}. Null for primitives. */
     public int[] byteOffsets;
 
-    /** Packed presence bitset: bit {@code i} set when row {@code firstRow + i} is non-null. */
-    public long[] presenceBits;
+    /**
+     * Off-heap view of the packed presence bitset: bit {@code i} set when row
+     * {@code firstRow + i} is non-null. One {@code long} word per 64 rows.
+     */
+    public MemorySegment presenceBits;
 
     /** Number of rows in the cached page. */
     public int rowCount() {
@@ -50,12 +63,13 @@ public final class PageCache {
      */
     public boolean isPresent(long row) {
         int idx = (int) (row - firstRow);
-        return (presenceBits[idx >> 6] & (1L << (idx & 63))) != 0L;
+        long word = presenceBits.getAtIndex(ValueLayout.JAVA_LONG, idx >> 6);
+        return (word & (1L << (idx & 63))) != 0L;
     }
 
     /** Returns the raw {@code long} bits for a primitive value at the given global row. */
     public long valueAt(long row) {
-        return values[(int) (row - firstRow)];
+        return values.getAtIndex(ValueLayout.JAVA_LONG, row - firstRow);
     }
 
     /** True when the given global row falls within this cached page's range. */
