@@ -870,7 +870,15 @@ const TYPE_BYTE_ARRAY: i32 = 5;
 /// group per call — this is the documented *slow path*; the hot path goes
 /// through `parquet_decode_page_at_row` (page-resident caching on the Java side).
 struct ColumnReaderState {
-    reader: SerializedFileReader<File>,
+    /// Parquet decoder, built LAZILY on the first page decode (first liquid miss / random-access
+    /// read), not at `open()`. Opening a `SerializedFileReader` with the page index parses the
+    /// thrift OffsetIndex/ColumnIndex — ~tens of ms on a large file — and is ONLY needed to decode
+    /// pages from the Parquet file. When a query is served entirely from the liquid page cache
+    /// (all hits), no page is ever decoded, so this reader is never built and that cost is avoided.
+    /// `None` until the first decode; see `reader_mut`.
+    reader: Option<SerializedFileReader<File>>,
+    /// Path to the Parquet file, retained so the reader can be built lazily on first decode.
+    filename: String,
     /// Leaf column index within the Parquet schema descriptor.
     leaf_idx: usize,
     /// Physical type of the column (validated against the caller's expectation).
@@ -1062,20 +1070,17 @@ impl ColumnReaderState {
             .cloned()
             .unwrap_or_default();
 
-        // Open a file handle for this column reader WITH the page index loaded: the retained
-        // cursor's skip_records uses the page index internally for efficient page-hopping. The
-        // per-file metadata cache above saves the JAVA-FACING costs (schema resolution, page
-        // layout computation, ColumnPageIndex FFM marshal) — this reader's page-index load is
-        // cheap (already in OS page cache from the first parse) and necessary for decode perf.
-        let file = File::open(filename).map_err(|e| format!("Failed to open '{}': {}", filename, e))?;
-        let options = ReadOptionsBuilder::new().with_page_index().build();
-        let reader = SerializedFileReader::new_with_options(file, options)
-            .map_err(|e| format!("Failed to read parquet '{}': {}", filename, e))?;
-
+        // NOTE: the Parquet decoder (SerializedFileReader with page index) is NOT built here.
+        // Building it parses the thrift OffsetIndex/ColumnIndex (~tens of ms on a large file) and
+        // is only needed to DECODE pages from the file. A query served entirely from the liquid
+        // page cache never decodes, so we defer this to the first actual decode (see reader_mut).
+        // Everything the liquid-hit path needs — page layout, row-group offsets, liquid file id —
+        // comes from the cached FileMetadataCache above, not from this reader.
         let liquid_file_id = crate::liquid_page_cache::file_id(filename);
 
         Ok(ColumnReaderState {
-            reader,
+            reader: None,
+            filename: filename.to_string(),
             leaf_idx,
             physical_type: phys,
             repeated: max_rep > 0,
@@ -1088,6 +1093,22 @@ impl ColumnReaderState {
             cursor: None,
             scratch: DecodeScratch::new(),
         })
+    }
+
+    /// Returns the Parquet decoder, building it on first use. Opening a `SerializedFileReader`
+    /// WITH the page index loaded is required for decode: the retained cursor's `skip_records`
+    /// uses the page index internally for efficient page-hopping. This is called only on a page
+    /// decode (liquid miss or random-access read), so on a fully liquid-warm scan it never runs.
+    fn reader_mut(&mut self) -> Result<&SerializedFileReader<File>, String> {
+        if self.reader.is_none() {
+            let file = File::open(&self.filename)
+                .map_err(|e| format!("Failed to open '{}': {}", self.filename, e))?;
+            let options = ReadOptionsBuilder::new().with_page_index().build();
+            let reader = SerializedFileReader::new_with_options(file, options)
+                .map_err(|e| format!("Failed to read parquet '{}': {}", self.filename, e))?;
+            self.reader = Some(reader);
+        }
+        Ok(self.reader.as_ref().unwrap())
     }
 
     /// Translate a global row position into `(row_group_index, local_offset)`.
@@ -1537,8 +1558,9 @@ pub unsafe extern "C" fn parquet_read_value_at_row(
     }
 
     let (rg_idx, local) = state.locate(row)?;
-    let rg = state.reader.get_row_group(rg_idx).map_err(|e| e.to_string())?;
-    let col = rg.get_column_reader(state.leaf_idx).map_err(|e| e.to_string())?;
+    let leaf_idx = state.leaf_idx;
+    let rg = state.reader_mut()?.get_row_group(rg_idx).map_err(|e| e.to_string())?;
+    let col = rg.get_column_reader(leaf_idx).map_err(|e| e.to_string())?;
     let local = local as usize;
 
     match col {
@@ -1671,8 +1693,9 @@ pub unsafe extern "C" fn parquet_read_repeated_at_row(
     }
 
     let (rg_idx, local) = state.locate(row)?;
-    let rg = state.reader.get_row_group(rg_idx).map_err(|e| e.to_string())?;
-    let col = rg.get_column_reader(state.leaf_idx).map_err(|e| e.to_string())?;
+    let leaf_idx = state.leaf_idx;
+    let rg = state.reader_mut()?.get_row_group(rg_idx).map_err(|e| e.to_string())?;
+    let col = rg.get_column_reader(leaf_idx).map_err(|e| e.to_string())?;
     let local = local as usize;
 
     match col {
@@ -2186,13 +2209,14 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
     // row-group change falls back to a fresh reader (dictionary re-decoded once).
     // The cursor is take()n up front so a decode error leaves it invalidated; each arm
     // re-installs it only after a successful decode.
+    let leaf_idx = state.leaf_idx;
     let (col, skip) = match state.cursor.take() {
         Some(c) if c.rg_idx == rg_idx && c.position <= first_global => {
             (c.col_reader, (first_global - c.position) as usize)
         }
         _ => {
-            let rg = state.reader.get_row_group(rg_idx).map_err(|e| e.to_string())?;
-            let col = rg.get_column_reader(state.leaf_idx).map_err(|e| e.to_string())?;
+            let rg = state.reader_mut()?.get_row_group(rg_idx).map_err(|e| e.to_string())?;
+            let col = rg.get_column_reader(leaf_idx).map_err(|e| e.to_string())?;
             (col, local_first as usize)
         }
     };
