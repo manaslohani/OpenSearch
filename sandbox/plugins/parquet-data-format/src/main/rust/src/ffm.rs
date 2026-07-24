@@ -1496,7 +1496,14 @@ pub unsafe extern "C" fn parquet_timing_snapshot(
 fn float_to_sortable_i64(v: f32) -> i64 {
     let b = v.to_bits() as i32;
     let s = b ^ ((b >> 31) & 0x7fff_ffff);
-    (s as u32) as i64 // zero-extend the 32-bit sortable pattern into the slot
+    // Sign-extend the 32-bit sortable int into the i64 slot. This mirrors vanilla OpenSearch,
+    // which stores `NumericUtils.floatToSortableInt(v)` widened to `long` via Java's int->long
+    // promotion (sign-extend). Sign-extending keeps the stored `i64` order-preserving, so the
+    // long-compare consumers (doc-values range queries, the DocValuesSkipper page min/max) order
+    // negatives correctly. Zero-extend `(s as u32) as i64` would round-trip the value read fine
+    // (the Java read truncates via `(int) longValue()`) but would map negatives to large positive
+    // longs, breaking those long-compare paths.
+    s as i64
 }
 
 /// Encode an `f64` into Lucene's order-preserving "sortable long" form. Mirrors
