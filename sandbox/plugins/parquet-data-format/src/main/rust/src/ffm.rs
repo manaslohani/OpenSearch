@@ -1224,11 +1224,13 @@ fn page_min_max(ci: &ColumnIndexMetaData, idx: usize, _phys: PhysicalType) -> (i
             _ => MINMAX_UNKNOWN,
         },
         ColumnIndexMetaData::FLOAT(p) => match (p.min_value(idx), p.max_value(idx)) {
-            (Some(min), Some(max)) => (min.to_bits() as i64, max.to_bits() as i64),
+            // Sortable encoding must match the value encoding (see float_to_sortable_i64) so the
+            // skipper's min/max bounds live in the same ordered space as the doc values.
+            (Some(min), Some(max)) => (float_to_sortable_i64(*min), float_to_sortable_i64(*max)),
             _ => MINMAX_UNKNOWN,
         },
         ColumnIndexMetaData::DOUBLE(p) => match (p.min_value(idx), p.max_value(idx)) {
-            (Some(min), Some(max)) => (min.to_bits() as i64, max.to_bits() as i64),
+            (Some(min), Some(max)) => (double_to_sortable_i64(*min), double_to_sortable_i64(*max)),
             _ => MINMAX_UNKNOWN,
         },
         ColumnIndexMetaData::BOOLEAN(p) => match (p.min_value(idx), p.max_value(idx)) {
@@ -1484,14 +1486,37 @@ pub unsafe extern "C" fn parquet_timing_snapshot(
     Ok(0)
 }
 
+/// Encode an `f32` into the order-preserving "sortable int" form that OpenSearch's float
+/// fielddata expects, widened into an i64 slot. The Java read path applies
+/// `NumericUtils.sortableIntToFloat((int) longValue())`, whose inverse is Lucene's
+/// `sortableFloatBits` (`bits ^ ((bits >> 31) & 0x7fffffff)` on the 32-bit int). Storing raw
+/// `to_bits` instead matches only for non-negative values (sign bit 0 → transform is a no-op)
+/// and returns garbage for negatives; applying the transform here fixes all signs.
+#[inline]
+fn float_to_sortable_i64(v: f32) -> i64 {
+    let b = v.to_bits() as i32;
+    let s = b ^ ((b >> 31) & 0x7fff_ffff);
+    (s as u32) as i64 // zero-extend the 32-bit sortable pattern into the slot
+}
+
+/// Encode an `f64` into Lucene's order-preserving "sortable long" form. Mirrors
+/// `float_to_sortable_i64` for doubles: the Java read applies `sortableLongToDouble`, whose
+/// inverse is `sortableDoubleBits` (`bits ^ ((bits >> 63) & 0x7fffffffffffffff)` on the 64-bit
+/// long). Required for correct negative doubles.
+#[inline]
+fn double_to_sortable_i64(v: f64) -> i64 {
+    let b = v.to_bits() as i64;
+    b ^ ((b >> 63) & 0x7fff_ffff_ffff_ffff_i64)
+}
+
 /// Slow-path single-value read at `row`.
 ///
 /// On success writes:
 ///   - `out_present` = 1 if the row has a value, 0 if null/absent
-///   - `out_long`    = the value's raw bits for primitive columns:
+///   - `out_long`    = the value's Lucene doc-values form for primitive columns:
 ///                       INT32 sign-extended to i64; INT64 verbatim;
-///                       FLOAT  = `f32::to_bits` (zero-extended);
-///                       DOUBLE = `f64::to_bits`;
+///                       FLOAT  = sortable int (see `float_to_sortable_i64`);
+///                       DOUBLE = sortable long (see `double_to_sortable_i64`);
 ///                       BOOL   = 0 or 1
 ///   - for BYTE_ARRAY columns: the value bytes are copied into `out_buf` and
 ///     `out_len` is set to the byte length (or -1 when the value is null).
@@ -1554,12 +1579,12 @@ pub unsafe extern "C" fn parquet_read_value_at_row(
         }
         ColumnReader::FloatColumnReader(mut r) => {
             if let Some(v) = read_record_values(&mut r, local)?.first() {
-                set_present(out_present, out_long, v.to_bits() as i64);
+                set_present(out_present, out_long, float_to_sortable_i64(*v));
             }
         }
         ColumnReader::DoubleColumnReader(mut r) => {
             if let Some(v) = read_record_values(&mut r, local)?.first() {
-                set_present(out_present, out_long, v.to_bits() as i64);
+                set_present(out_present, out_long, double_to_sortable_i64(*v));
             }
         }
         ColumnReader::BoolColumnReader(mut r) => {
@@ -1686,11 +1711,11 @@ pub unsafe extern "C" fn parquet_read_repeated_at_row(
         }
         ColumnReader::FloatColumnReader(mut r) => {
             let vals = read_record_values(&mut r, local)?;
-            write_primitive_repeated(vals.iter().map(|v| v.to_bits() as i64), vals.len(), out_count, out_longs, out_long_cap)
+            write_primitive_repeated(vals.iter().map(|v| float_to_sortable_i64(*v)), vals.len(), out_count, out_longs, out_long_cap)
         }
         ColumnReader::DoubleColumnReader(mut r) => {
             let vals = read_record_values(&mut r, local)?;
-            write_primitive_repeated(vals.iter().map(|v| v.to_bits() as i64), vals.len(), out_count, out_longs, out_long_cap)
+            write_primitive_repeated(vals.iter().map(|v| double_to_sortable_i64(*v)), vals.len(), out_count, out_longs, out_long_cap)
         }
         ColumnReader::BoolColumnReader(mut r) => {
             let vals = read_record_values(&mut r, local)?;
@@ -2235,7 +2260,7 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
             let scratch = &mut state.scratch;
             decode_primitive_page(
                 &mut r, skip, num_rows_usize, max_def_level, effective_null_count,
-                &mut scratch.def_levels, &mut scratch.values_f32, |v| v.to_bits() as i64,
+                &mut scratch.def_levels, &mut scratch.values_f32, |v| float_to_sortable_i64(v),
                 out_value_buf, out_presence_bitset,
             )?;
             state.cursor = Some(CursorState { rg_idx, col_reader: ColumnReader::FloatColumnReader(r), position: next_position });
@@ -2248,7 +2273,7 @@ pub unsafe extern "C" fn parquet_decode_page_at_row(
             let scratch = &mut state.scratch;
             decode_primitive_page(
                 &mut r, skip, num_rows_usize, max_def_level, effective_null_count,
-                &mut scratch.def_levels, &mut scratch.values_f64, |v| v.to_bits() as i64,
+                &mut scratch.def_levels, &mut scratch.values_f64, |v| double_to_sortable_i64(v),
                 out_value_buf, out_presence_bitset,
             )?;
             state.cursor = Some(CursorState { rg_idx, col_reader: ColumnReader::DoubleColumnReader(r), position: next_position });
