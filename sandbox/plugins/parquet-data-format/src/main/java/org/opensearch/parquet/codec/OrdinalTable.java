@@ -10,6 +10,8 @@ package org.opensearch.parquet.codec;
 
 import org.apache.lucene.util.BytesRef;
 import org.opensearch.parquet.bridge.ParquetColumnReader;
+import org.opensearch.parquet.codec.cache.ColumnPageIndex;
+import org.opensearch.parquet.codec.cache.PageCache;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -80,10 +82,76 @@ public final class OrdinalTable {
     }
 
     /**
-     * Builds the single-valued ordinal table by scanning {@code rows} of a keyword/ip column
-     * via the reader's slow path.
+     * Builds the single-valued ordinal table by decoding the keyword/ip column PAGE BY PAGE and
+     * consuming every value in each decoded page, instead of the per-row {@code readBytesAtRow}
+     * slow path.
+     *
+     * <p>Why: {@code readBytesAtRow(row)} opens a fresh column reader and {@code skip_records(row)}
+     * from the row-group start on EVERY call, so building the table one row at a time re-decodes
+     * pages from the start repeatedly — O(N^2) page decodes for N rows, which never finishes on a
+     * 100M-row column. Here we drive the same batched page decode the numeric hot path uses
+     * ({@link ParquetColumnReader#loadPageContaining}), decode each page ONCE, and read all of its
+     * values from the resident {@link PageCache} (byte buffer + CSR offsets), exactly as
+     * {@code ParquetBinaryDocValues} does per-doc. Result: ~one decode per page (linear), same
+     * output table.
      */
     public static OrdinalTable buildSingleValued(ParquetColumnReader reader, int numRows) throws IOException {
+        Map<BytesRef, List<Integer>> occurrences = new HashMap<>();
+        ColumnPageIndex pageIndex = reader.pageIndex();
+
+        // Walk pages in order. loadPageContaining(row) decodes the whole page holding `row` into
+        // the reader's PageCache (or sets it null for a Layer-4 all-nulls page). We then read
+        // every present row in [firstRow, lastRow] straight from the resident page.
+        long row = 0;
+        while (row < numRows) {
+            int pageIdx = pageIndex.pageForRow(row);
+            long pageFirst = pageIndex.firstRowOf(pageIdx);
+            long pageRows = pageIndex.numRowsOf(pageIdx);
+            long pageEnd = Math.min(pageFirst + pageRows, numRows); // exclusive, clamp to numRows
+
+            reader.loadPageContaining(row);
+            PageCache pc = reader.cache();
+            if (pc == null) {
+                // Layer 4: whole page is null — no distinct terms, every row stays -1. Skip it.
+                row = pageEnd;
+                continue;
+            }
+            int first = (int) pc.firstRow;
+            int last = (int) pc.lastRow;
+            for (int r = first; r <= last && r < numRows; r++) {
+                if (pc.isPresent(r)) {
+                    int rel = r - first;
+                    int start = pc.byteOffsets[rel];
+                    int end = pc.byteOffsets[rel + 1];
+                    // Copy the value bytes out of the shared page byte[] into a stable key — the
+                    // page buffer is reused by the next decode, so the BytesRef key must own a copy.
+                    byte[] v = Arrays.copyOfRange(pc.byteBuf, start, end);
+                    occurrences.computeIfAbsent(new BytesRef(v), k -> new ArrayList<>()).add(r);
+                }
+            }
+            row = last + 1;
+        }
+        Build b = assignOrdinals(occurrences);
+
+        // Per-row single ordinal (-1 = missing).
+        int[] rowOrdinals = new int[numRows];
+        Arrays.fill(rowOrdinals, -1);
+        for (Map.Entry<BytesRef, List<Integer>> e : occurrences.entrySet()) {
+            int ord = b.termToOrd.get(e.getKey());
+            for (int r : e.getValue()) {
+                rowOrdinals[r] = ord;
+            }
+        }
+        return new OrdinalTable(b.sortedTerms, rowOrdinals, null, null);
+    }
+
+    /**
+     * Original per-row build via {@link ParquetColumnReader#readBytesAtRow}. Retained for
+     * fallback/A-B comparison; superseded by the page-batched {@link #buildSingleValued} above,
+     * which avoids the O(N^2) per-row re-decode.
+     */
+    @SuppressWarnings("unused")
+    static OrdinalTable buildSingleValuedPerRow(ParquetColumnReader reader, int numRows) throws IOException {
         // Pass 1: collect distinct terms and per-row occurrences.
         Map<BytesRef, List<Integer>> occurrences = new HashMap<>();
         for (int row = 0; row < numRows; row++) {
