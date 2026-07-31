@@ -2068,6 +2068,50 @@ public class DataFormatAwareEngine implements Indexer {
         }
     }
 
+    // HARDCODE (local codec smoke-test only; do NOT ship): build a Lucene Engine.Searcher over the
+    // composite shard's LUCENE-format DirectoryReader so IndexShard's normal search path can serve
+    // aggregations through the Parquet DocValues reader wrapper. Bypasses the DataFusion interception
+    // (run without dsl-query-executor) and the applyOnEngine/EngineBackedIndexer gate. Reaches the
+    // Lucene reader by DataFormat name ("lucene") and LuceneReader.directoryReader() reflectively,
+    // since LuceneReader lives in the analytics-backend-lucene plugin (not on the server classpath).
+    public Engine.Searcher acquireLuceneSearcherHardcode(String source, java.util.function.Function<Engine.Searcher, Engine.Searcher> wrapper)
+        throws IOException {
+        ensureOpen();
+        GatedCloseable<CatalogSnapshot> snapshotRef = catalogSnapshotManager.acquireSnapshot();
+        try {
+            CatalogSnapshot catalogSnapshot = snapshotRef.get();
+            Object luceneReader = null;
+            for (Map.Entry<DataFormat, EngineReaderManager<?>> entry : readerManagers.entrySet()) {
+                if ("lucene".equals(entry.getKey().name())) {
+                    luceneReader = entry.getValue().getReader(catalogSnapshot);
+                    break;
+                }
+            }
+            if (luceneReader == null) {
+                snapshotRef.close();
+                throw new IllegalStateException("no LUCENE reader manager on composite engine for shard " + shardId);
+            }
+            org.apache.lucene.index.DirectoryReader dirReader = (org.apache.lucene.index.DirectoryReader) luceneReader.getClass()
+                .getMethod("directoryReader")
+                .invoke(luceneReader);
+            Engine.Searcher raw = new Engine.Searcher(
+                source,
+                dirReader,
+                engineConfig.getSimilarity(),
+                engineConfig.getQueryCache(),
+                engineConfig.getQueryCachingPolicy(),
+                snapshotRef::close
+            );
+            return wrapper == null ? raw : wrapper.apply(raw);
+        } catch (IOException e) {
+            snapshotRef.close();
+            throw e;
+        } catch (Exception e) {
+            snapshotRef.close();
+            throw new IOException("acquireLuceneSearcherHardcode failed", e);
+        }
+    }
+
     @Override
     public void ensureOpen() {
         if (isClosed.get()) {

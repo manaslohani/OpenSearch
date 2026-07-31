@@ -2478,6 +2478,23 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         readAllowed();
         markSearcherAccessed();
         final Indexer engine = getIndexer();
+        // HARDCODE (local codec smoke-test only; do NOT ship): route composite-engine search through
+        // the LUCENE DirectoryReader so the Parquet DocValues reader wrapper serves aggregations.
+        if (engine instanceof DataFormatAwareEngine dfa) {
+            return new Engine.SearcherSupplier(this::wrapSearcher) {
+                @Override
+                protected Engine.Searcher acquireSearcherInternal(String source) {
+                    try {
+                        return dfa.acquireLuceneSearcherHardcode(source, null);
+                    } catch (IOException e) {
+                        throw new org.opensearch.OpenSearchException("hardcode composite searcher failed", e);
+                    }
+                }
+
+                @Override
+                protected void doClose() {}
+            };
+        }
         return applyOnEngine(engine, eng -> eng.acquireSearcherSupplier(this::wrapSearcher, scope));
     }
 
@@ -2496,6 +2513,14 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         readAllowed();
         markSearcherAccessed();
         final Indexer indexer = getIndexer();
+        // HARDCODE (local codec smoke-test only; do NOT ship): see acquireSearcherSupplier above.
+        if (indexer instanceof DataFormatAwareEngine dfa) {
+            try {
+                return dfa.acquireLuceneSearcherHardcode(source, this::wrapSearcher);
+            } catch (IOException e) {
+                throw new org.opensearch.OpenSearchException("hardcode composite searcher failed", e);
+            }
+        }
         return applyOnEngine(indexer, engine -> engine.acquireSearcher(source, scope, this::wrapSearcher));
     }
 
