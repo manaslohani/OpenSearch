@@ -34,7 +34,6 @@ import org.opensearch.common.lucene.index.SequentialStoredFieldsLeafReader;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
-import org.opensearch.parquet.codec.cache.QueryParquetStats;
 import org.opensearch.parquet.codec.iter.ParquetDictionarySortedDocValues;
 import org.opensearch.parquet.codec.iter.ParquetSortedDocValues;
 import org.opensearch.parquet.codec.iter.ParquetUninvertedSortedDocValues;
@@ -101,22 +100,19 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     private final SegmentReadState segmentReadState;
 
     /** Per-query stats accumulator shared across all leaves of one search; may be null in tests. */
-    private final QueryParquetStats queryStats;
 
     private ParquetDocValuesLeafReader(
         LeafReader in,
         MapperService mapperService,
         SegmentReadState segmentReadState,
         Map<String, FieldInfo> parquetFields,
-        FieldInfos mergedFieldInfos,
-        QueryParquetStats queryStats
+        FieldInfos mergedFieldInfos
     ) {
         super(in);
         this.mapperService = mapperService;
         this.segmentReadState = segmentReadState;
         this.parquetFields = parquetFields;
         this.mergedFieldInfos = mergedFieldInfos;
-        this.queryStats = queryStats;
     }
 
     /**
@@ -124,7 +120,7 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
      * segment and the mapping declares at least one Parquet-codec-supported field that is missing
      * doc values in the Lucene segment. Otherwise returns {@code in} unwrapped.
      */
-    public static LeafReader wrapIfApplicable(LeafReader in, MapperService mapperService, QueryParquetStats queryStats) throws IOException {
+    public static LeafReader wrapIfApplicable(LeafReader in, MapperService mapperService) throws IOException {
         SegmentReader segmentReader;
         try {
             segmentReader = Lucene.segmentReader(in);
@@ -187,7 +183,7 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
         }
 
         FieldInfos mergedInfos = new FieldInfos(merged.toArray(new FieldInfo[0]));
-        return new ParquetDocValuesLeafReader(in, mapperService, state, parquetFields, mergedInfos, queryStats);
+        return new ParquetDocValuesLeafReader(in, mapperService, state, parquetFields, mergedInfos);
     }
 
     /**
@@ -230,7 +226,6 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     private synchronized ParquetDocValuesProducer producer() throws IOException {
         if (producerInitialized == false) {
             producer = new ParquetDocValuesProducer(segmentReadState, mapperService);
-            producer.setQueryStats(queryStats);
             producerInitialized = true;
         }
         if (producer != null && producer.isClosed()) {
@@ -240,9 +235,7 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             // itself closes — the contract every reader-keyed cache in Lucene/OpenSearch assumes.
             ParquetDocValuesProducer shared = SharedProducerRegistry.get(in.getCoreCacheHelper(), segmentReadState, mapperService);
             if (shared == null) {
-                throw new IllegalStateException(
-                    "doc values requested after the search closed and the segment has no core cache identity"
-                );
+                throw new IllegalStateException("doc values requested after the search closed and the segment has no core cache identity");
             }
             return shared;
         }

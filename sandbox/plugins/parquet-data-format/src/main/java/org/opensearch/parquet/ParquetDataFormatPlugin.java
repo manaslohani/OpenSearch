@@ -44,7 +44,6 @@ import org.opensearch.parquet.codec.ParquetDocValuesProducer;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.engine.ParquetIndexingEngine;
 import org.opensearch.parquet.fields.ArrowSchemaBuilder;
-import org.opensearch.parquet.rest.ParquetLiquidCacheClearRestAction;
 import org.opensearch.parquet.stats.ParquetStatsProvider;
 import org.opensearch.parquet.stats.transport.ParquetNodeStatsActionType;
 import org.opensearch.parquet.stats.transport.ParquetNodeStatsRestAction;
@@ -140,30 +139,12 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin,
         long mergeMax = ParquetSettings.MERGE_POOL_MAX.get(this.settings);
         RustBridge.initMemoryPools(writeMax, mergeMax);
 
-        // Enable the codec-owned cross-query decoded-page cache (liquid-cache core) when configured.
-        // Off by default → the DocValues decode path is unchanged.
-        boolean liquidCacheEnabled = ParquetSettings.LIQUID_CACHE_ENABLED.get(this.settings);
-        if (liquidCacheEnabled) {
-            long liquidCacheMaxBytes = ParquetSettings.LIQUID_CACHE_MAX_BYTES.get(this.settings).getBytes();
-            // Mount the liquid t4 store under the node's data directory (real disk, always writable —
-            // never tmpfs), so the cache does not depend on TMPDIR/-Djava.io.tmpdir pointing at a
-            // suitable filesystem. Falls back to java.io.tmpdir only if no data path is configured.
-            Path[] dataPaths = nodeEnvironment.nodeDataPaths();
-            Path liquidCacheDir = (dataPaths != null && dataPaths.length > 0)
-                ? dataPaths[0].resolve("parquet_liquid_cache")
-                : environment.tmpDir();
-            RustBridge.liquidCacheSetEnabled(true, liquidCacheMaxBytes, liquidCacheDir.toString());
-        }
-
-        ParquetDocValuesProducer.setDecodePath(ParquetSettings.DOCVALUES_DECODE_PATH.get(this.settings));
         ParquetDocValuesProducer.setInitialBatchSize(ParquetSettings.DOCVALUES_INITIAL_BATCH_SIZE.get(this.settings));
         ParquetDocValuesProducer.setDiagnostics(ParquetSettings.DOCVALUES_DIAGNOSTICS.get(this.settings));
         ParquetDocValuesProducer.setDictionaryMaxTerms(ParquetSettings.DOCVALUES_DICTIONARY_MAX_TERMS.get(this.settings));
         ParquetDocValuesProducer.setDictionaryCacheBytes(ParquetSettings.DOCVALUES_DICTIONARY_CACHE_BYTES.get(this.settings));
         ParquetDocValuesProducer.setUninvertMaxDiskBytes(ParquetSettings.DOCVALUES_UNINVERT_MAX_DISK_BYTES.get(this.settings));
         org.opensearch.parquet.codec.UninvertedOrdinalsCache.setOrdsDir(environment.dataFiles()[0].resolve("parquet-ords"));
-        clusterService.getClusterSettings()
-            .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_DECODE_PATH, ParquetDocValuesProducer::setDecodePath);
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_INITIAL_BATCH_SIZE, ParquetDocValuesProducer::setInitialBatchSize);
         clusterService.getClusterSettings()
@@ -173,7 +154,10 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin,
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_DICTIONARY_CACHE_BYTES, ParquetDocValuesProducer::setDictionaryCacheBytes);
         clusterService.getClusterSettings()
-            .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_UNINVERT_MAX_DISK_BYTES, ParquetDocValuesProducer::setUninvertMaxDiskBytes);
+            .addSettingsUpdateConsumer(
+                ParquetSettings.DOCVALUES_UNINVERT_MAX_DISK_BYTES,
+                ParquetDocValuesProducer::setUninvertMaxDiskBytes
+            );
 
         // Register virtual pools if allocator is available (arrow-base loaded)
         if (nativeAllocator != null) {
@@ -325,7 +309,7 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin,
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<DiscoveryNodes> nodesInCluster
     ) {
-        return List.of(new ParquetStatsRestAction(), new ParquetNodeStatsRestAction(), new ParquetLiquidCacheClearRestAction());
+        return List.of(new ParquetStatsRestAction(), new ParquetNodeStatsRestAction());
     }
 
     /**

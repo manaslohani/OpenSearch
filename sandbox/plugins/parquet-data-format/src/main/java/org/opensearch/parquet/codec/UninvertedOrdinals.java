@@ -19,8 +19,8 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.LongValues;
-import org.apache.lucene.util.packed.DirectWriter;
 import org.apache.lucene.util.packed.DirectReader;
+import org.apache.lucene.util.packed.DirectWriter;
 import org.apache.lucene.util.packed.PackedInts;
 
 import java.io.Closeable;
@@ -192,16 +192,7 @@ public final class UninvertedOrdinals implements Closeable {
                     + "refusing uninverted ordinals to avoid silent undercounts"
             );
         }
-        return new UninvertedOrdinals(
-            directory,
-            input,
-            ords,
-            checkpoints.toArray(new BytesRef[0]),
-            terms,
-            (int) termCount,
-            size,
-            fileName
-        );
+        return new UninvertedOrdinals(directory, input, ords, checkpoints.toArray(new BytesRef[0]), terms, (int) termCount, size, fileName);
     }
 
     /** The segment ordinal for {@code doc}, or -1 when the document has no value. */

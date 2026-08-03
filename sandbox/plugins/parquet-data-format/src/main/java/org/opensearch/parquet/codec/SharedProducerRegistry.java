@@ -43,11 +43,8 @@ final class SharedProducerRegistry {
      * on first use. Returns {@code null} when the segment exposes no core cache helper (no safe
      * lifecycle to attach to — callers must fail rather than leak).
      */
-    static ParquetDocValuesProducer get(
-        IndexReader.CacheHelper coreHelper,
-        SegmentReadState segmentReadState,
-        MapperService mapperService
-    ) throws IOException {
+    static ParquetDocValuesProducer get(IndexReader.CacheHelper coreHelper, SegmentReadState segmentReadState, MapperService mapperService)
+        throws IOException {
         if (coreHelper == null) {
             return null;
         }

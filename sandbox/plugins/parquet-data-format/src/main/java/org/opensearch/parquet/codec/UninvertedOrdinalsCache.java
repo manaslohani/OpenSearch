@@ -65,8 +65,7 @@ public final class UninvertedOrdinalsCache {
      * rebuild fixes (segment data moved on after an unclean stop). Only a failure on a FRESH
      * build is genuine (unindexed stored values) and latches the field ineligible.
      */
-    private static UninvertedOrdinals buildWithRetry(String fileKey, Terms terms, int maxDoc, long expectedNonNullDocs)
-        throws IOException {
+    private static UninvertedOrdinals buildWithRetry(String fileKey, Terms terms, int maxDoc, long expectedNonNullDocs) throws IOException {
         String fileName = "parquet-ords-" + fileKey + ".ord";
         boolean preExisting = java.nio.file.Files.exists(ORDS_DIR.resolve(fileName));
         try {

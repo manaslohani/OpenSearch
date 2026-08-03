@@ -38,7 +38,6 @@ import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.StringHelper;
 import org.apache.lucene.util.Version;
 import org.opensearch.nativebridge.spi.ArrowExport;
-import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.NativeParquetWriter;
 import org.opensearch.parquet.bridge.ParquetSortConfig;
 import org.opensearch.parquet.bridge.RustBridge;
@@ -59,12 +58,10 @@ public class DataFusionDocValuesTests extends OpenSearchTestCase {
         super.setUp();
         RustBridge.initLogger();
         allocator = new RootAllocator();
-        ParquetDocValuesProducer.setDecodePath(ParquetSettings.DECODE_PATH_DATAFUSION);
     }
 
     @Override
     public void tearDown() throws Exception {
-        ParquetDocValuesProducer.setDecodePath(ParquetSettings.DECODE_PATH_CODEC_NATIVE);
         allocator.close();
         super.tearDown();
     }
@@ -76,7 +73,6 @@ public class DataFusionDocValuesTests extends OpenSearchTestCase {
 
         FieldInfo numbers = fieldInfo("numbers", 0, DocValuesType.SORTED_NUMERIC);
         FieldInfo tags = fieldInfo("tags", 1, DocValuesType.SORTED_SET);
-        long nativeReadersBefore = RustBridge.openColumnReaderCount();
         long dataFusionReadersBefore = RustBridge.dfOpenIterCount();
 
         try (
@@ -84,7 +80,6 @@ public class DataFusionDocValuesTests extends OpenSearchTestCase {
             ParquetDocValuesProducer producer = new ParquetDocValuesProducer(segmentReadState(directory, parquetFile, numbers, tags), null)
         ) {
             SortedNumericDocValues numeric = producer.getSortedNumeric(numbers);
-            assertEquals(nativeReadersBefore, RustBridge.openColumnReaderCount());
             assertEquals(dataFusionReadersBefore + 1, RustBridge.dfOpenIterCount());
 
             assertTrue(numeric.advanceExact(0));
@@ -100,7 +95,6 @@ public class DataFusionDocValuesTests extends OpenSearchTestCase {
             assertEquals(8L, numeric.nextValue());
 
             SortedSetDocValues sortedSet = producer.getSortedSet(tags);
-            assertEquals(nativeReadersBefore, RustBridge.openColumnReaderCount());
             assertEquals(dataFusionReadersBefore + 2, RustBridge.dfOpenIterCount());
 
             assertTrue(sortedSet.advanceExact(0));
@@ -114,10 +108,8 @@ public class DataFusionDocValuesTests extends OpenSearchTestCase {
             assertEquals(new BytesRef("alpha"), sortedSet.lookupOrd(sortedSet.nextOrd()));
             assertEquals(new BytesRef("omega"), sortedSet.lookupOrd(sortedSet.nextOrd()));
 
-            assertEquals(nativeReadersBefore, RustBridge.openColumnReaderCount());
         }
 
-        assertEquals(nativeReadersBefore, RustBridge.openColumnReaderCount());
         assertEquals(dataFusionReadersBefore, RustBridge.dfOpenIterCount());
     }
 

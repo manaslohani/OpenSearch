@@ -21,17 +21,6 @@ import java.util.Map;
 
 public class ParquetSettingsTests extends OpenSearchTestCase {
 
-    public void testDocValuesDecodePath() {
-        assertEquals(ParquetSettings.DECODE_PATH_CODEC_NATIVE, ParquetSettings.DOCVALUES_DECODE_PATH.get(Settings.EMPTY));
-        Settings settings = Settings.builder().put("parquet.docvalues.decode_path", "DATAFUSION").build();
-        assertEquals(ParquetSettings.DECODE_PATH_DATAFUSION, ParquetSettings.DOCVALUES_DECODE_PATH.get(settings));
-    }
-
-    public void testInvalidDocValuesDecodePathThrows() {
-        Settings settings = Settings.builder().put("parquet.docvalues.decode_path", "other").build();
-        expectThrows(IllegalArgumentException.class, () -> ParquetSettings.DOCVALUES_DECODE_PATH.get(settings));
-    }
-
     public void testDocValuesInitialBatchSize() {
         assertEquals(32, ParquetSettings.DOCVALUES_INITIAL_BATCH_SIZE.get(Settings.EMPTY).intValue());
         Settings settings = Settings.builder().put("parquet.docvalues.initial_batch_size", 4196).build();

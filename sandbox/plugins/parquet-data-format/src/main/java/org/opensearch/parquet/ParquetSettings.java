@@ -217,43 +217,6 @@ public final class ParquetSettings {
         Setting.Property.NodeScope
     );
 
-    /**
-     * Enables the codec-owned cross-query decoded-page cache (backed by liquid-cache core). When off
-     * (the default), the DocValues codec decode path is unchanged and the native cache is never
-     * consulted. Node-scoped: set in {@code opensearch.yml} or via {@code -E} at launch.
-     */
-    public static final Setting<Boolean> LIQUID_CACHE_ENABLED = Setting.boolSetting(
-        "parquet.liquid_cache.enabled",
-        false,
-        Setting.Property.NodeScope
-    );
-
-    /**
-     * Memory budget for the codec-owned decoded-page cache. A value of 0 leaves the native liquid
-     * default budget. Only consulted when {@link #LIQUID_CACHE_ENABLED} is true.
-     */
-    public static final Setting<ByteSizeValue> LIQUID_CACHE_MAX_BYTES = Setting.byteSizeSetting(
-        "parquet.liquid_cache.max_bytes",
-        new ByteSizeValue(0, ByteSizeUnit.BYTES),
-        Setting.Property.NodeScope
-    );
-
-    public static final String DECODE_PATH_CODEC_NATIVE = "codec_native";
-    public static final String DECODE_PATH_DATAFUSION = "datafusion";
-    public static final Set<String> VALID_DECODE_PATHS = Set.of(DECODE_PATH_CODEC_NATIVE, DECODE_PATH_DATAFUSION);
-
-    /**
-     * Selects the DocValues decoder. The DataFusion path retains one Arrow reader per accessed
-     * column and advances it by row using page-level OffsetIndex skips.
-     */
-    public static final Setting<String> DOCVALUES_DECODE_PATH = new Setting<>(
-        "parquet.docvalues.decode_path",
-        DECODE_PATH_CODEC_NATIVE,
-        ParquetSettings::validateDecodePath,
-        Setting.Property.NodeScope,
-        Setting.Property.Dynamic
-    );
-
     /** Starting Arrow decode window for the adaptive DataFusion DocValues cursor. */
     public static final Setting<Integer> DOCVALUES_INITIAL_BATCH_SIZE = Setting.intSetting(
         "parquet.docvalues.initial_batch_size",
@@ -306,14 +269,6 @@ public final class ParquetSettings {
         Setting.Property.NodeScope,
         Setting.Property.Dynamic
     );
-
-    private static String validateDecodePath(String value) {
-        String normalized = value.toLowerCase(Locale.ROOT);
-        if (VALID_DECODE_PATHS.contains(normalized) == false) {
-            throw new IllegalArgumentException("Invalid parquet.docvalues.decode_path: " + value + ". Valid values: " + VALID_DECODE_PATHS);
-        }
-        return normalized;
-    }
 
     /**
      * Minimum number of variable-width (string/binary) non-sort columns required to activate
@@ -947,9 +902,6 @@ public final class ParquetSettings {
             MERGE_BATCH_SIZE,
             MERGE_RAYON_THREADS,
             MERGE_IO_THREADS,
-            LIQUID_CACHE_ENABLED,
-            LIQUID_CACHE_MAX_BYTES,
-            DOCVALUES_DECODE_PATH,
             DOCVALUES_INITIAL_BATCH_SIZE,
             DOCVALUES_DIAGNOSTICS,
             DOCVALUES_DICTIONARY_MAX_TERMS,

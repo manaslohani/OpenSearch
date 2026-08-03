@@ -15,7 +15,6 @@ import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.util.BytesRef;
-import org.opensearch.parquet.codec.cache.RowIdStats;
 
 import java.io.IOException;
 
@@ -310,35 +309,8 @@ final class RowIdRemappingDocValues {
      * resolver (backed by its own {@code __row_id__} iterator) per codec iterator.
      */
     static RowIdResolver resolverFrom(SortedNumericDocValues rowIdDocValues) {
-        return resolverFrom(rowIdDocValues, null);
-    }
-
-    /**
-     * As {@link #resolverFrom(SortedNumericDocValues)}, but records the lookup <b>count</b> into
-     * {@code stats} (and marks IDENTITY when there is no row-id field). When {@code stats} is null,
-     * no instrumentation is added (the resolver is the plain hot path).
-     *
-     * <p>Only the lookup count is recorded — never per-call timing. The per-document work is on the
-     * order of tens of nanoseconds, comparable to {@code System.nanoTime()} itself, so timing each
-     * call cannot produce a trustworthy figure; the actual wall-clock spent here is measured with a
-     * CPU flamegraph instead (see {@link RowIdStats}).
-     */
-    static RowIdResolver resolverFrom(SortedNumericDocValues rowIdDocValues, RowIdStats stats) {
         if (rowIdDocValues == null) {
-            if (stats != null) {
-                stats.markIdentity();
-            }
             return RowIdResolver.IDENTITY;
-        }
-        if (stats == null) {
-            return docId -> {
-                if (rowIdDocValues.advanceExact(docId) == false) {
-                    throw new IllegalStateException(
-                        "missing __row_id__ doc value for docId=" + docId + "; cannot translate to Parquet row position"
-                    );
-                }
-                return rowIdDocValues.nextValue();
-            };
         }
         return docId -> {
             if (rowIdDocValues.advanceExact(docId) == false) {
@@ -347,9 +319,7 @@ final class RowIdRemappingDocValues {
                 );
             }
             // __row_id__ is single-valued; take the first (and only) value.
-            long rowId = rowIdDocValues.nextValue();
-            stats.recordLookup();
-            return rowId;
+            return rowIdDocValues.nextValue();
         };
     }
 }

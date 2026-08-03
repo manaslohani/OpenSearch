@@ -22,14 +22,11 @@ import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
-import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.BinaryPageReader;
 import org.opensearch.parquet.bridge.DataFusionColumnReader;
-import org.opensearch.parquet.bridge.ParquetColumnReader;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.codec.cache.BufferPool;
-import org.opensearch.parquet.codec.cache.QueryParquetStats;
 import org.opensearch.parquet.codec.iter.ParquetBinaryDocValues;
 import org.opensearch.parquet.codec.iter.ParquetNumericDocValues;
 import org.opensearch.parquet.codec.iter.ParquetSortedDocValues;
@@ -38,7 +35,6 @@ import org.opensearch.parquet.codec.iter.ParquetSortedSetDocValues;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 
@@ -66,17 +62,11 @@ import java.util.Map;
 public final class ParquetDocValuesProducer extends DocValuesProducer {
 
     private static final Logger logger = LogManager.getLogger(ParquetDocValuesProducer.class);
-    private static volatile boolean useDataFusionDecodePath;
     private static volatile int dataFusionInitialBatchSize = 32;
     private static volatile boolean dataFusionDiagnostics;
     private static volatile int dictionaryMaxTerms = 65536;
     private static volatile long dictionaryCacheBytes = 64 * 1024 * 1024;
     private static volatile long uninvertMaxDiskBytes = 2L * 1024 * 1024 * 1024;
-
-    /** Updates the node-wide DocValues decode path. */
-    public static void setDecodePath(String decodePath) {
-        useDataFusionDecodePath = ParquetSettings.DECODE_PATH_DATAFUSION.equals(decodePath);
-    }
 
     /** Updates the cardinality budget for dictionary-rank keyword ordinals. */
     public static void setDictionaryMaxTerms(int maxTerms) {
@@ -150,12 +140,10 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private final long parquetRowCount;
 
     private final BufferPool bufferPool = new BufferPool();
-    private final Map<String, ParquetColumnReader> columnReaders = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<String, DataFusionColumnReader> dataFusionColumnReaders = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.List<java.io.Closeable> dedicatedReaders = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     /** Optional per-query accumulator; propagated to each column reader so its stats roll up at close. */
-    private QueryParquetStats queryStats;
 
     private boolean closed;
 
@@ -202,52 +190,27 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         }
     }
 
-    /**
-     * Attaches the per-query accumulator. The accumulator is propagated to every column reader
-     * (existing and future) so each reader's stats roll up into the query total when it closes.
-     */
-    public void setQueryStats(QueryParquetStats queryStats) {
-        this.queryStats = queryStats;
-        if (queryStats != null) {
-            for (ParquetColumnReader reader : columnReaders.values()) {
-                reader.setQueryStats(queryStats);
-            }
-        }
-    }
-
     // ── DocValuesProducer API ──
 
     @Override
     public NumericDocValues getNumeric(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.NUMERIC);
-        if (useDataFusionDecodePath) {
-            return new ParquetNumericDocValues(dataFusionReaderFor(field, false), maxDoc);
-        }
-        ParquetColumnReader reader = readerFor(field, false);
-        return new ParquetNumericDocValues(reader, maxDoc);
+        return new ParquetNumericDocValues(dataFusionReaderFor(field, false), maxDoc);
     }
 
     @Override
     public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.SORTED_NUMERIC);
-        if (useDataFusionDecodePath) {
-            return new ParquetSortedNumericDocValues(dataFusionReaderFor(field, true), maxDoc);
-        }
-        ParquetColumnReader reader = readerFor(field, true);
-        return new ParquetSortedNumericDocValues(reader, maxDoc);
+        return new ParquetSortedNumericDocValues(dataFusionReaderFor(field, true), maxDoc);
     }
 
     @Override
     public BinaryDocValues getBinary(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.BINARY);
-        if (useDataFusionDecodePath) {
-            return new ParquetBinaryDocValues(dataFusionReaderFor(field, false), maxDoc);
-        }
-        ParquetColumnReader reader = readerFor(field, false);
-        return new ParquetBinaryDocValues(reader, maxDoc);
+        return new ParquetBinaryDocValues(dataFusionReaderFor(field, false), maxDoc);
     }
 
     @Override
@@ -289,14 +252,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             // define independent Lucene document ranges. Do not expose unsafe stats.
             return null;
         }
-        if (useDataFusionDecodePath) {
-            return new ParquetDocValuesSkipper(dataFusionReaderFor(field, false).pageIndex(), maxDoc);
-        }
-        // Match the repeated flag the field's DV accessor will use — readerFor caches by field
-        // name, so opening here with a mismatched flag would poison the cache for the accessor.
-        boolean repeated = field.getDocValuesType() == DocValuesType.SORTED_NUMERIC;
-        ParquetColumnReader reader = readerFor(field, repeated);
-        return new ParquetDocValuesSkipper(reader.pageIndex(), maxDoc);
+        return new ParquetDocValuesSkipper(dataFusionReaderFor(field, false).pageIndex(), maxDoc);
     }
 
     /**
@@ -329,16 +285,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         // ([PARQUET_DV_QUERY_STATS]); no per-segment detail line here.
         closed = true;
         IOException first = null;
-        for (ParquetColumnReader reader : columnReaders.values()) {
-            try {
-                reader.close();
-            } catch (IOException | RuntimeException e) {
-                if (first == null && e instanceof IOException io) {
-                    first = io;
-                }
-                // Suppress per-reader errors so every reader gets a chance to close.
-            }
-        }
         for (DataFusionColumnReader reader : dataFusionColumnReaders.values()) {
             try {
                 reader.close();
@@ -361,7 +307,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             }
         }
         dedicatedReaders.clear();
-        columnReaders.clear();
         dataFusionColumnReaders.clear();
         bufferPool.close();
         if (first != null) {
@@ -401,17 +346,6 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         };
     }
 
-    private synchronized ParquetColumnReader readerFor(FieldInfo field, boolean repeated) throws IOException {
-        ParquetColumnReader reader = columnReaders.get(field.getName());
-        if (reader == null) {
-            reader = ParquetColumnReader.open(parquetFile, field.getName(), physicalType(field), repeated, bufferPool);
-            reader.setQueryStats(queryStats);
-            columnReaders.put(field.getName(), reader);
-        }
-        return reader;
-    }
-
-
     /**
      * A dedicated (non-shared) binary reader for one streaming sorted iterator. Concurrent
      * segment-search slices each obtain their own DocValues instance; sharing one forward
@@ -438,21 +372,18 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     }
 
     private synchronized BinaryPageReader binaryReaderFor(FieldInfo field, boolean repeated) throws IOException {
-        if (useDataFusionDecodePath) {
-            DataFusionColumnReader reader = DataFusionColumnReader.open(
-                parquetFile,
-                field.getName(),
-                physicalType(field),
-                repeated,
-                bufferPool,
-                dataFusionInitialBatchSize
-            );
-            dedicatedReaders.add(reader);
-            return reader;
-        }
-        // codec_native path: keep the shared per-field reader (its iterators tolerate sharing,
-        // and its pool slots are not instance-scoped).
-        return readerFor(field, repeated);
+        // Sorted iterators need instance-scoped cursors (shared producers are accessed
+        // concurrently), so each gets a dedicated reader with instance-unique pool slots.
+        DataFusionColumnReader reader = DataFusionColumnReader.open(
+            parquetFile,
+            field.getName(),
+            physicalType(field),
+            repeated,
+            bufferPool,
+            dataFusionInitialBatchSize
+        );
+        dedicatedReaders.add(reader);
+        return reader;
     }
 
     private synchronized DataFusionColumnReader dataFusionReaderFor(FieldInfo field, boolean repeated) throws IOException {

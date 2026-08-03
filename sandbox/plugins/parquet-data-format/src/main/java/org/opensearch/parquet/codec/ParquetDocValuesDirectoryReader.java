@@ -8,14 +8,10 @@
 
 package org.opensearch.parquet.codec;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.FilterDirectoryReader;
 import org.apache.lucene.index.LeafReader;
 import org.opensearch.index.mapper.MapperService;
-import org.opensearch.parquet.bridge.RustBridge;
-import org.opensearch.parquet.codec.cache.QueryParquetStats;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -37,35 +33,11 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
 
     // Dedicated stats channel, NOT the class-named logger, so the per-query summary can be toggled
     // in isolation (logger.org.opensearch.parquet.stats.query=TRACE) without turning on any other
-    // codec class's logging. Enabling it affects only this one diagnostic line.
-    private static final Logger statsLogger = LogManager.getLogger("org.opensearch.parquet.stats.query");
-
-    // Parallel timing channel — toggled independently of statsLogger. When at TRACE, the native
-    // phase timers are enabled and baselined at query start, and per-query nanoTime is accumulated.
-    private static final Logger timingLog = LogManager.getLogger("org.opensearch.parquet.timing");
-
     private final MapperService mapperService;
-    private final QueryParquetStats queryStats;
 
-    private ParquetDocValuesDirectoryReader(DirectoryReader in, MapperService mapperService, QueryParquetStats queryStats)
-        throws IOException {
-        super(in, new ParquetSubReaderWrapper(mapperService, queryStats));
+    private ParquetDocValuesDirectoryReader(DirectoryReader in, MapperService mapperService) throws IOException {
+        super(in, new ParquetSubReaderWrapper(mapperService));
         this.mapperService = mapperService;
-        this.queryStats = queryStats;
-        // Baseline the process-wide liquid counters so doClose() can report per-query deltas. Only
-        // when the summary will actually be logged — the snapshot is an FFM crossing, so this keeps
-        // it fully off (no native call) on the raw-performance path where TRACE is disabled.
-        if (statsLogger.isTraceEnabled()) {
-            RustBridge.LiquidCacheStats base = RustBridge.liquidCacheStats();
-            queryStats.captureLiquidBaseline(base.hits(), base.misses(), base.puts());
-        }
-        // Parallel timing path: enable native phase timers and baseline them so doClose() can report
-        // per-query deltas. Fully off (no native call, no nanoTime) when the timing channel is not at TRACE.
-        if (timingLog.isTraceEnabled()) {
-            RustBridge.timingSetEnabled(true);
-            RustBridge.TimingStats tbase = RustBridge.timingSnapshot();
-            queryStats.captureTimingBaseline(tbase.getNanos(), tbase.decodeNanos(), tbase.putNanos());
-        }
     }
 
     /**
@@ -73,13 +45,12 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
      * code paths.
      */
     public static DirectoryReader wrap(DirectoryReader in, MapperService mapperService) throws IOException {
-        return new ParquetDocValuesDirectoryReader(in, mapperService, new QueryParquetStats());
+        return new ParquetDocValuesDirectoryReader(in, mapperService);
     }
 
     @Override
     protected DirectoryReader doWrapDirectoryReader(DirectoryReader in) throws IOException {
-        // A reopened reader is a fresh search view; give it its own accumulator.
-        return new ParquetDocValuesDirectoryReader(in, mapperService, new QueryParquetStats());
+        return new ParquetDocValuesDirectoryReader(in, mapperService);
     }
 
     @Override
@@ -112,17 +83,6 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
                     first = e;
                 }
             }
-            // The per-query [PARQUET_DV_QUERY_STATS] summary is TRACE-only so it is NOT emitted during
-            // raw-performance runs. Counters are always accumulated (cheap); to see the summary enable
-            // the dedicated stats channel: logger.org.opensearch.parquet.stats.query=TRACE.
-            if (queryStats != null && queryStats.isEmpty() == false && statsLogger.isTraceEnabled()) {
-                RustBridge.LiquidCacheStats now = RustBridge.liquidCacheStats();
-                statsLogger.trace("[PARQUET_DV_QUERY_STATS] {}", queryStats.summary(now.hits(), now.misses(), now.puts()));
-            }
-            if (queryStats != null && queryStats.isEmpty() == false && timingLog.isTraceEnabled()) {
-                RustBridge.TimingStats tnow = RustBridge.timingSnapshot();
-                timingLog.trace("[PARQUET_DV_TIMING] {}", queryStats.timingSummary(tnow.getNanos(), tnow.decodeNanos(), tnow.putNanos()));
-            }
         }
         if (first != null) {
             throw first;
@@ -132,17 +92,15 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
     /** Per-leaf wrapper that swaps in {@link ParquetDocValuesLeafReader} when applicable. */
     private static final class ParquetSubReaderWrapper extends SubReaderWrapper {
         private final MapperService mapperService;
-        private final QueryParquetStats queryStats;
 
-        private ParquetSubReaderWrapper(MapperService mapperService, QueryParquetStats queryStats) {
+        private ParquetSubReaderWrapper(MapperService mapperService) {
             this.mapperService = mapperService;
-            this.queryStats = queryStats;
         }
 
         @Override
         public LeafReader wrap(LeafReader reader) {
             try {
-                return ParquetDocValuesLeafReader.wrapIfApplicable(reader, mapperService, queryStats);
+                return ParquetDocValuesLeafReader.wrapIfApplicable(reader, mapperService);
             } catch (IOException e) {
                 // SubReaderWrapper.wrap cannot throw checked exceptions; surface as unchecked so
                 // the search fails loudly rather than silently dropping Parquet doc values.
