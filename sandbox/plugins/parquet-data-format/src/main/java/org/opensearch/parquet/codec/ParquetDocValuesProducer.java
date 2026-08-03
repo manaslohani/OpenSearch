@@ -23,6 +23,7 @@ import org.apache.lucene.index.SortedSetDocValues;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.parquet.ParquetSettings;
+import org.opensearch.parquet.bridge.BinaryPageReader;
 import org.opensearch.parquet.bridge.DataFusionColumnReader;
 import org.opensearch.parquet.bridge.ParquetColumnReader;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
@@ -56,8 +57,8 @@ import java.util.Map;
  * <h2>Laziness and lifecycle</h2>
  * The constructor resolves the Parquet file and checks the invariant but opens no column-reader
  * handle. Each {@code getX(field)} lazily opens and caches the reader selected by the configured
- * decode path; {@code getSorted}/{@code getSortedSet} additionally build and cache an
- * {@link OrdinalTable} on first access. {@link #close()} releases every reader, ordinal table,
+ * decode path; {@code getSorted}/{@code getSortedSet} serve streaming
+ * per-document ordinals with no segment-wide ordinal structure (see ParquetSortedSetDocValues). {@link #close()} releases every reader, ordinal table,
  * and the shared {@link BufferPool}, and is idempotent.
  *
  * <p>Not thread-safe: one producer serves one segment on one query thread.
@@ -68,10 +69,39 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private static volatile boolean useDataFusionDecodePath;
     private static volatile int dataFusionInitialBatchSize = 32;
     private static volatile boolean dataFusionDiagnostics;
+    private static volatile int dictionaryMaxTerms = 65536;
+    private static volatile long dictionaryCacheBytes = 64 * 1024 * 1024;
+    private static volatile long uninvertMaxDiskBytes = 2L * 1024 * 1024 * 1024;
 
     /** Updates the node-wide DocValues decode path. */
     public static void setDecodePath(String decodePath) {
         useDataFusionDecodePath = ParquetSettings.DECODE_PATH_DATAFUSION.equals(decodePath);
+    }
+
+    /** Updates the cardinality budget for dictionary-rank keyword ordinals. */
+    public static void setDictionaryMaxTerms(int maxTerms) {
+        dictionaryMaxTerms = maxTerms;
+    }
+
+    /** Updates the node-wide heap budget for cached term dictionaries. */
+    public static void setDictionaryCacheBytes(long bytes) {
+        dictionaryCacheBytes = bytes;
+    }
+
+    static int dictionaryMaxTerms() {
+        return dictionaryMaxTerms;
+    }
+
+    static long dictionaryCacheBytes() {
+        return dictionaryCacheBytes;
+    }
+
+    public static void setUninvertMaxDiskBytes(long bytes) {
+        uninvertMaxDiskBytes = bytes;
+    }
+
+    static long uninvertMaxDiskBytes() {
+        return uninvertMaxDiskBytes;
     }
 
     /** Updates the starting window used by newly opened DataFusion cursors. */
@@ -120,9 +150,9 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private final long parquetRowCount;
 
     private final BufferPool bufferPool = new BufferPool();
-    private final Map<String, ParquetColumnReader> columnReaders = new HashMap<>();
-    private final Map<String, DataFusionColumnReader> dataFusionColumnReaders = new HashMap<>();
-    private final Map<String, OrdinalTable> ordinalTables = new HashMap<>();
+    private final Map<String, ParquetColumnReader> columnReaders = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, DataFusionColumnReader> dataFusionColumnReaders = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.List<java.io.Closeable> dedicatedReaders = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     /** Optional per-query accumulator; propagated to each column reader so its stats roll up at close. */
     private QueryParquetStats queryStats;
@@ -224,16 +254,17 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     public SortedDocValues getSorted(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.SORTED);
-        OrdinalTable table = ordinalTableFor(field, false);
-        return new ParquetSortedDocValues(table, maxDoc);
+        return new ParquetSortedDocValues(binaryReaderFor(field, false), maxDoc);
     }
 
     @Override
     public SortedSetDocValues getSortedSet(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.SORTED_SET);
-        OrdinalTable table = ordinalTableFor(field, true);
-        return new ParquetSortedSetDocValues(table, maxDoc);
+        // Convention (mirrors the ordinal-table era and the leaf reader's routing): SORTED_SET
+        // reaches this producer only for genuinely repeated columns; single-valued keywords are
+        // served through getSorted and wrapped with DocValues.singleton by the leaf reader.
+        return new ParquetSortedSetDocValues(binaryReaderFor(field, true), true, maxDoc);
     }
 
     /**
@@ -320,9 +351,18 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
                 logger.warn("Failed to close DataFusion column reader for [{}]", parquetFile, e);
             }
         }
+        for (java.io.Closeable reader : dedicatedReaders) {
+            try {
+                reader.close();
+            } catch (IOException | RuntimeException e) {
+                if (first == null && e instanceof IOException io) {
+                    first = io;
+                }
+            }
+        }
+        dedicatedReaders.clear();
         columnReaders.clear();
         dataFusionColumnReaders.clear();
-        ordinalTables.clear();
         bufferPool.close();
         if (first != null) {
             throw first;
@@ -361,7 +401,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         };
     }
 
-    private ParquetColumnReader readerFor(FieldInfo field, boolean repeated) throws IOException {
+    private synchronized ParquetColumnReader readerFor(FieldInfo field, boolean repeated) throws IOException {
         ParquetColumnReader reader = columnReaders.get(field.getName());
         if (reader == null) {
             reader = ParquetColumnReader.open(parquetFile, field.getName(), physicalType(field), repeated, bufferPool);
@@ -371,7 +411,51 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         return reader;
     }
 
-    private DataFusionColumnReader dataFusionReaderFor(FieldInfo field, boolean repeated) throws IOException {
+
+    /**
+     * A dedicated (non-shared) binary reader for one streaming sorted iterator. Concurrent
+     * segment-search slices each obtain their own DocValues instance; sharing one forward
+     * cursor between them turns every access into a resident-page miss as the slices ping-pong
+     * the shared PageCache. Dedicated readers keep each slice's scan sequential. Registered for
+     * close with the producer.
+     */
+    /**
+     * Number of rows with a non-null value in this column, from the Parquet page index's
+     * per-page null counts; {@code -1} when any page lacks the statistic. Used to verify that
+     * postings-derived ordinal tables cover every stored value.
+     */
+    long nonNullRowCount(FieldInfo field) throws IOException {
+        org.opensearch.parquet.codec.cache.ColumnPageIndex idx = dataFusionReaderFor(field, false).pageIndex();
+        long nonNull = 0;
+        for (int page = 0; page < idx.pageCount(); page++) {
+            long nulls = idx.nullCountOf(page);
+            if (nulls < 0) {
+                return -1;
+            }
+            nonNull += idx.numRowsOf(page) - nulls;
+        }
+        return nonNull;
+    }
+
+    private synchronized BinaryPageReader binaryReaderFor(FieldInfo field, boolean repeated) throws IOException {
+        if (useDataFusionDecodePath) {
+            DataFusionColumnReader reader = DataFusionColumnReader.open(
+                parquetFile,
+                field.getName(),
+                physicalType(field),
+                repeated,
+                bufferPool,
+                dataFusionInitialBatchSize
+            );
+            dedicatedReaders.add(reader);
+            return reader;
+        }
+        // codec_native path: keep the shared per-field reader (its iterators tolerate sharing,
+        // and its pool slots are not instance-scoped).
+        return readerFor(field, repeated);
+    }
+
+    private synchronized DataFusionColumnReader dataFusionReaderFor(FieldInfo field, boolean repeated) throws IOException {
         DataFusionColumnReader reader = dataFusionColumnReaders.get(field.getName());
         if (reader == null) {
             reader = DataFusionColumnReader.open(
@@ -387,20 +471,9 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         return reader;
     }
 
-    private OrdinalTable ordinalTableFor(FieldInfo field, boolean multiValued) throws IOException {
-        OrdinalTable table = ordinalTables.get(field.getName());
-        if (table == null) {
-            if (useDataFusionDecodePath) {
-                DataFusionColumnReader reader = dataFusionReaderFor(field, multiValued);
-                table = multiValued ? OrdinalTable.buildMultiValued(reader, maxDoc) : OrdinalTable.buildSingleValued(reader, maxDoc);
-                ordinalTables.put(field.getName(), table);
-                return table;
-            }
-            ParquetColumnReader reader = readerFor(field, multiValued);
-            table = multiValued ? OrdinalTable.buildMultiValued(reader, maxDoc) : OrdinalTable.buildSingleValued(reader, maxDoc);
-            ordinalTables.put(field.getName(), table);
-        }
-        return table;
+    /** Whether {@link #close()} has run (leaf wrappers reroute to the shared producer then). */
+    boolean isClosed() {
+        return closed;
     }
 
     private void ensureOpen() {

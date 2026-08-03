@@ -35,6 +35,9 @@ import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.parquet.codec.cache.QueryParquetStats;
+import org.opensearch.parquet.codec.iter.ParquetDictionarySortedDocValues;
+import org.opensearch.parquet.codec.iter.ParquetSortedDocValues;
+import org.opensearch.parquet.codec.iter.ParquetUninvertedSortedDocValues;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -230,7 +233,26 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             producer.setQueryStats(queryStats);
             producerInitialized = true;
         }
+        if (producer != null && producer.isClosed()) {
+            // This wrapper outlived its request: a cache (fielddata, global ordinals) retained it
+            // and is calling back after the search closed the request producer. Serve through the
+            // segment-lifetime shared producer so cached consumers stay valid until the segment
+            // itself closes — the contract every reader-keyed cache in Lucene/OpenSearch assumes.
+            ParquetDocValuesProducer shared = SharedProducerRegistry.get(in.getCoreCacheHelper(), segmentReadState, mapperService);
+            if (shared == null) {
+                throw new IllegalStateException(
+                    "doc values requested after the search closed and the segment has no core cache identity"
+                );
+            }
+            return shared;
+        }
         return producer;
+    }
+
+    /** Whether the mapper types this field (or subfield) as keyword — values indexed verbatim. */
+    private boolean isKeywordField(String field) {
+        org.opensearch.index.mapper.MappedFieldType fieldType = mapperService.fieldType(field);
+        return fieldType != null && "keyword".equals(fieldType.typeName());
     }
 
     /** Returns the synthetic FieldInfo if the given field is served from Parquet, else null. */
@@ -338,10 +360,46 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
         FieldInfo fi = parquetFieldInfo(field);
         if (fi != null && fi.getDocValuesType() == DocValuesType.SORTED) {
             RowIdResolver resolver = newRowIdResolver();
-            SortedDocValues sorted = producer().getSorted(fi);
+            SortedDocValues sorted = withDictionaryOrdinals(field, producer().getSorted(fi));
             return resolver == RowIdResolver.IDENTITY ? sorted : RowIdRemappingDocValues.sorted(sorted, resolver, maxDoc());
         }
         return in.getSortedDocValues(field);
+    }
+
+    /**
+     * Upgrades a streaming sorted iterator to fully contract-compliant segment ordinals when the
+     * field's cardinality fits the dictionary budget. The sorted term dictionary is read from
+     * the composite index's Lucene sidecar (O(distinct), cached per segment) — never from a row
+     * scan. Above-budget fields keep the streaming iterator, whose global-ordinal operations
+     * fail fast rather than materialize.
+     */
+    private SortedDocValues withDictionaryOrdinals(String field, SortedDocValues sorted) throws IOException {
+        // Ordinal tiers rank Parquet VALUES against the Lucene sidecar's TERMS, which only
+        // coincide for untokenized (keyword) fields. A text field's terms are analyzer tokens:
+        // ranking values against tokens would produce silently wrong ordinals. Text fields stay
+        // on the streaming iterator, whose global operations fail fast toward execution_hint:map.
+        if (isKeywordField(field) == false) {
+            return sorted;
+        }
+        if (sorted instanceof ParquetSortedDocValues streaming) {
+            TermDictionary dictionary = TermDictionaryCache.get(
+                in,
+                field,
+                ParquetDocValuesProducer.dictionaryMaxTerms(),
+                ParquetDocValuesProducer.dictionaryCacheBytes()
+            );
+            if (dictionary != null) {
+                return new ParquetDictionarySortedDocValues(streaming, dictionary);
+            }
+            // Above the dictionary budget: disk-backed uninverted ordinals (built once per
+            // segment from the sidecar's postings, memory-mapped, working-set resident).
+            long expectedNonNull = producer().nonNullRowCount(parquetFieldInfo(field));
+            UninvertedOrdinals uninverted = UninvertedOrdinalsCache.get(in, segmentReadState.segmentInfo, field, expectedNonNull);
+            if (uninverted != null) {
+                return new ParquetUninvertedSortedDocValues(uninverted, streaming, maxDoc());
+            }
+        }
+        return sorted;
     }
 
     @Override
@@ -361,7 +419,7 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             FieldInfo asSorted = fi.getDocValuesType() == DocValuesType.SORTED
                 ? fi
                 : newDocValuesFieldInfo(field, fi.number, DocValuesType.SORTED, fi.docValuesSkipIndexType());
-            SortedDocValues sorted = producer().getSorted(asSorted);
+            SortedDocValues sorted = withDictionaryOrdinals(field, producer().getSorted(asSorted));
             RowIdResolver resolver = newRowIdResolver();
             SortedDocValues remapped = resolver == RowIdResolver.IDENTITY
                 ? sorted
@@ -427,6 +485,9 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     // Cache helpers must delegate to the underlying reader so query/segment caches stay coherent.
     @Override
     public CacheHelper getCoreCacheHelper() {
+        // Full cache identity restored: filter cache, fielddata and global-ordinals caches all key
+        // off this. Consumers cached beyond the request remain valid because producer() reroutes
+        // post-close access to the segment-lifetime shared producer (SharedProducerRegistry).
         return in.getCoreCacheHelper();
     }
 

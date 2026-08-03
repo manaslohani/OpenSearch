@@ -47,6 +47,39 @@ public final class DataFusionColumnReader implements Closeable, NumericPageReade
 
     private static final byte[] EMPTY_BYTES = new byte[0];
 
+    /** Distinguishes pool slots across reader instances: several dedicated readers may serve the
+     * same column concurrently (one per search slice), and slots must never be shared. */
+    private static final java.util.concurrent.atomic.AtomicLong INSTANCE_IDS = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * GC backstop for native cursors. Readers opened by segment-lifetime shared producers are
+     * handed to cache-retained iterators with no close hook; when such an iterator becomes
+     * unreachable, the cleaner releases its cursor instead of waiting for segment close.
+     * Explicit {@link #close()} remains the primary path and unregisters the action.
+     */
+    private static final java.lang.ref.Cleaner CLEANER = java.lang.ref.Cleaner.create();
+
+    /** Cursor handle shared with the cleaner action; cleared on explicit close. */
+    private static final class CursorState implements Runnable {
+        private final java.util.concurrent.atomic.AtomicLong handle;
+
+        CursorState(long handle) {
+            this.handle = new java.util.concurrent.atomic.AtomicLong(handle);
+        }
+
+        @Override
+        public void run() {
+            long stale = handle.getAndSet(CLOSED_HANDLE);
+            if (stale != CLOSED_HANDLE) {
+                try {
+                    RustBridge.dfCloseIter(stale);
+                } catch (java.io.IOException e) {
+                    // Nothing actionable during GC-driven cleanup.
+                }
+            }
+        }
+    }
+
     private final BufferPool bufferPool;
     private final Path file;
     private final String column;
@@ -71,6 +104,7 @@ public final class DataFusionColumnReader implements Closeable, NumericPageReade
     private final String slotPrefix;
 
     private long handle;
+    private final CursorState cursorState;
     private ColumnPageIndex pageIndex;
     private PageCache cache;
     private int outputRowsCapacity;
@@ -87,13 +121,15 @@ public final class DataFusionColumnReader implements Closeable, NumericPageReade
         int initialBatchSize
     ) {
         this.handle = handle;
+        this.cursorState = new CursorState(handle);
+        CLEANER.register(this, cursorState);
         this.file = file;
         this.column = column;
         this.type = type;
         this.repeated = repeated;
         this.bufferPool = bufferPool;
         this.initialBatchSize = initialBatchSize;
-        this.slotPrefix = "df:" + column + ":";
+        this.slotPrefix = "df:" + INSTANCE_IDS.incrementAndGet() + ":" + column + ":";
         this.firstRowSlot = slotPrefix + "firstRow";
         this.lastRowSlot = slotPrefix + "lastRow";
         this.valueLenSlot = slotPrefix + "valueLen";
@@ -484,6 +520,7 @@ public final class DataFusionColumnReader implements Closeable, NumericPageReade
         long current = handle;
         handle = CLOSED_HANDLE;
         cache = null;
+        cursorState.handle.set(CLOSED_HANDLE);
         RustBridge.dfCloseIter(current);
     }
 

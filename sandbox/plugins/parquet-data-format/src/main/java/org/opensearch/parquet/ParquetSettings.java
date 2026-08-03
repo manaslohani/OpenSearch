@@ -264,6 +264,41 @@ public final class ParquetSettings {
         Setting.Property.Dynamic
     );
 
+    /**
+     * Cardinality budget for dictionary-rank keyword ordinals: fields whose distinct-term count
+     * (from the Lucene sidecar's terms index) is at most this many get fully contract-compliant
+     * segment ordinals; larger fields stay on the streaming fail-fast path.
+     */
+    public static final Setting<Integer> DOCVALUES_DICTIONARY_MAX_TERMS = Setting.intSetting(
+        "parquet.docvalues.dictionary.max_terms",
+        65536,
+        0,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /** Node-wide heap budget for cached keyword term dictionaries. */
+    public static final Setting<Long> DOCVALUES_DICTIONARY_CACHE_BYTES = Setting.longSetting(
+        "parquet.docvalues.dictionary.cache_bytes",
+        64 * 1024 * 1024,
+        0,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /**
+     * Node-wide disk budget for uninverted-ordinal files. When a new build would exceed it,
+     * unreferenced ord files are reclaimed oldest-first; if it still does not fit, the tier is
+     * refused for that field (consumers fall back to the streaming fail-fast path).
+     */
+    public static final Setting<Long> DOCVALUES_UNINVERT_MAX_DISK_BYTES = Setting.longSetting(
+        "parquet.docvalues.uninvert.max_disk_bytes",
+        2L * 1024 * 1024 * 1024,
+        0,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     /** Emits DataFusion cursor diagnostics for DocValues decoder benchmarking. */
     public static final Setting<Boolean> DOCVALUES_DIAGNOSTICS = Setting.boolSetting(
         "parquet.docvalues.diagnostics",
@@ -917,6 +952,9 @@ public final class ParquetSettings {
             DOCVALUES_DECODE_PATH,
             DOCVALUES_INITIAL_BATCH_SIZE,
             DOCVALUES_DIAGNOSTICS,
+            DOCVALUES_DICTIONARY_MAX_TERMS,
+            DOCVALUES_DICTIONARY_CACHE_BYTES,
+            DOCVALUES_UNINVERT_MAX_DISK_BYTES,
             MERGE_DEFERRED_COLUMN_THRESHOLD,
             WRITE_POOL_MIN,
             WRITE_POOL_MAX,

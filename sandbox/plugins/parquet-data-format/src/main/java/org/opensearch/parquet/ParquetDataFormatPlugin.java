@@ -158,12 +158,22 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin,
         ParquetDocValuesProducer.setDecodePath(ParquetSettings.DOCVALUES_DECODE_PATH.get(this.settings));
         ParquetDocValuesProducer.setInitialBatchSize(ParquetSettings.DOCVALUES_INITIAL_BATCH_SIZE.get(this.settings));
         ParquetDocValuesProducer.setDiagnostics(ParquetSettings.DOCVALUES_DIAGNOSTICS.get(this.settings));
+        ParquetDocValuesProducer.setDictionaryMaxTerms(ParquetSettings.DOCVALUES_DICTIONARY_MAX_TERMS.get(this.settings));
+        ParquetDocValuesProducer.setDictionaryCacheBytes(ParquetSettings.DOCVALUES_DICTIONARY_CACHE_BYTES.get(this.settings));
+        ParquetDocValuesProducer.setUninvertMaxDiskBytes(ParquetSettings.DOCVALUES_UNINVERT_MAX_DISK_BYTES.get(this.settings));
+        org.opensearch.parquet.codec.UninvertedOrdinalsCache.setOrdsDir(environment.dataFiles()[0].resolve("parquet-ords"));
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_DECODE_PATH, ParquetDocValuesProducer::setDecodePath);
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_INITIAL_BATCH_SIZE, ParquetDocValuesProducer::setInitialBatchSize);
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_DIAGNOSTICS, ParquetDocValuesProducer::setDiagnostics);
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_DICTIONARY_MAX_TERMS, ParquetDocValuesProducer::setDictionaryMaxTerms);
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_DICTIONARY_CACHE_BYTES, ParquetDocValuesProducer::setDictionaryCacheBytes);
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_UNINVERT_MAX_DISK_BYTES, ParquetDocValuesProducer::setUninvertMaxDiskBytes);
 
         // Register virtual pools if allocator is available (arrow-base loaded)
         if (nativeAllocator != null) {
@@ -251,6 +261,13 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin,
             return Map.of();
         }
         return Map.of(parquetFormat, storeStrategy);
+    }
+
+    @Override
+    public void close() throws java.io.IOException {
+        // Abort any in-flight uninverted-ordinal builds so node shutdown is not delayed.
+        org.opensearch.parquet.codec.UninvertedOrdinalsCache.shutdown();
+        super.close();
     }
 
     @Override
