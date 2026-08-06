@@ -107,14 +107,7 @@ public final class QueryParquetStats {
             long lp = liquidPutsNow - liquidPutsBase;
             long lget = lh + lm;
             double lHitRate = lget == 0 ? 0.0 : (double) lh / lget * 100.0;
-            liquidLine = String.format(
-                Locale.ROOT,
-                " | liquid: hits=%d decoded=%d puts=%d (liquidHitRate=%.2f%%)",
-                lh,
-                lm,
-                lp,
-                lHitRate
-            );
+            liquidLine = String.format(Locale.ROOT, " | liquid: hits=%d decoded=%d puts=%d (liquidHitRate=%.2f%%)", lh, lm, lp, lHitRate);
         }
         return String.format(
             Locale.ROOT,
@@ -150,13 +143,7 @@ public final class QueryParquetStats {
             long getD = getNow - getNanosBase;
             long decodeD = decodeNow - decodeNanosBase;
             long putD = putNow - putNanosBase;
-            rustLine = String.format(
-                Locale.ROOT,
-                " | rust: get=%.1fms decode=%.1fms put=%.1fms",
-                getD / 1e6,
-                decodeD / 1e6,
-                putD / 1e6
-            );
+            rustLine = String.format(Locale.ROOT, " | rust: get=%.1fms decode=%.1fms put=%.1fms", getD / 1e6, decodeD / 1e6, putD / 1e6);
         }
         return String.format(
             Locale.ROOT,

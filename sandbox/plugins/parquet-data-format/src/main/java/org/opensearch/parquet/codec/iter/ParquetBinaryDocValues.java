@@ -10,7 +10,7 @@ package org.opensearch.parquet.codec.iter;
 
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.util.BytesRef;
-import org.opensearch.parquet.bridge.ParquetColumnReader;
+import org.opensearch.parquet.bridge.BinaryPageReader;
 import org.opensearch.parquet.codec.cache.PageCache;
 
 import java.io.IOException;
@@ -25,14 +25,14 @@ import java.io.IOException;
  */
 public final class ParquetBinaryDocValues extends BinaryDocValues {
 
-    private final ParquetColumnReader reader;
+    private final BinaryPageReader reader;
     private final int maxDoc;
     private final BytesRef scratch = new BytesRef();
 
     private int doc = -1;
     private boolean currentPresent;
 
-    public ParquetBinaryDocValues(ParquetColumnReader reader, int maxDoc) {
+    public ParquetBinaryDocValues(BinaryPageReader reader, int maxDoc) {
         this.reader = reader;
         this.maxDoc = maxDoc;
     }

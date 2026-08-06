@@ -68,11 +68,11 @@ public final class ParquetSegmentLayout {
         }
 
         // 2. Fallback: scan for a .parquet file across the locations the composite/parquet engines
-        //    use. The composite engine's ParquetIndexingEngine writes files to the shard's
-        //    "parquet/" data directory, which is a *sibling* of the Lucene segment directory
-        //    (shardPath/parquet vs shardPath/index), so we must look both inside the segment
-        //    directory (single-file unit-test layout) and in the sibling parquet/ dir
-        //    (real deployment layout).
+        // use. The composite engine's ParquetIndexingEngine writes files to the shard's
+        // "parquet/" data directory, which is a *sibling* of the Lucene segment directory
+        // (shardPath/parquet vs shardPath/index), so we must look both inside the segment
+        // directory (single-file unit-test layout) and in the sibling parquet/ dir
+        // (real deployment layout).
         Path dir = directoryPath(state.directory);
         if (dir == null) {
             return null;

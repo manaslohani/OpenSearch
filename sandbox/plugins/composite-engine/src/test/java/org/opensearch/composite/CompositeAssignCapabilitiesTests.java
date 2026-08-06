@@ -20,6 +20,7 @@ import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperParsingException;
 import org.opensearch.index.mapper.NumberFieldMapper;
+import org.opensearch.index.mapper.TextFieldMapper;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.Map;
@@ -84,6 +85,33 @@ public class CompositeAssignCapabilitiesTests extends OpenSearchTestCase {
         assertEquals(2, map.size());
         assertEquals(Set.of(Capability.COLUMNAR_STORAGE), map.get(parquet));
         assertEquals(Set.of(Capability.FULL_TEXT_SEARCH), map.get(lucene));
+    }
+
+    public void testOptionalTextColumnarStorageUsesPrimary() {
+        DataFormat parquet = CompositeTestHelper.stubFormat(
+            "parquet",
+            1,
+            Set.of(new FieldTypeCapabilities("text", Set.of(Capability.COLUMNAR_STORAGE)))
+        );
+        DataFormat lucene = CompositeTestHelper.stubFormat(
+            "lucene",
+            2,
+            Set.of(new FieldTypeCapabilities("text", Set.of(Capability.FULL_TEXT_SEARCH)))
+        );
+        DataFormatRegistry registry = mock(DataFormatRegistry.class);
+        when(registry.getRegisteredFormats()).thenReturn(Set.of(parquet, lucene));
+        IndexSettings indexSettings = buildIndexSettings(
+            Settings.builder()
+                .put(CompositeDataFormatPlugin.PRIMARY_DATA_FORMAT.getKey(), "parquet")
+                .putList(CompositeDataFormatPlugin.SECONDARY_DATA_FORMATS.getKey(), "lucene")
+                .build()
+        );
+
+        MappedFieldType field = new TextFieldMapper.TextFieldType("message");
+        new CompositeDataFormatPlugin().assignCapabilities(field, indexSettings, registry);
+
+        assertEquals(Set.of(Capability.COLUMNAR_STORAGE), field.getCapabilityMap().get(parquet));
+        assertEquals(Set.of(Capability.FULL_TEXT_SEARCH), field.getCapabilityMap().get(lucene));
     }
 
     public void testNeitherFormatCoversAll_Throws() {

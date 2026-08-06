@@ -9,7 +9,7 @@
 package org.opensearch.parquet.codec;
 
 import org.apache.lucene.util.BytesRef;
-import org.opensearch.parquet.bridge.ParquetColumnReader;
+import org.opensearch.parquet.bridge.BinaryPageReader;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -81,9 +81,9 @@ public final class OrdinalTable {
 
     /**
      * Builds the single-valued ordinal table by scanning {@code rows} of a keyword/ip column
-     * via the reader's slow path.
+     * through the configured binary batch reader.
      */
-    public static OrdinalTable buildSingleValued(ParquetColumnReader reader, int numRows) throws IOException {
+    public static OrdinalTable buildSingleValued(BinaryPageReader reader, int numRows) throws IOException {
         // Pass 1: collect distinct terms and per-row occurrences.
         Map<BytesRef, List<Integer>> occurrences = new HashMap<>();
         for (int row = 0; row < numRows; row++) {
@@ -108,10 +108,10 @@ public final class OrdinalTable {
 
     /**
      * Builds the multi-valued ordinal table by scanning {@code rows} of a multi-valued
-     * keyword/ip column via the reader's slow path. The per-row CSR slice is sorted ascending
-     * and de-duplicated (set semantics).
+     * keyword/ip column through the configured repeated-binary batch reader. The per-row CSR
+     * slice is sorted ascending and de-duplicated (set semantics).
      */
-    public static OrdinalTable buildMultiValued(ParquetColumnReader reader, int numRows) throws IOException {
+    public static OrdinalTable buildMultiValued(BinaryPageReader reader, int numRows) throws IOException {
         // Pass 1: collect distinct terms and, per row, the distinct set of terms present.
         Map<BytesRef, List<Integer>> occurrences = new HashMap<>();
         // Track per-row term sets so we can de-duplicate within a row (SortedSet semantics).

@@ -16,6 +16,7 @@ import org.apache.lucene.index.DocValuesSkipper;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
+import org.apache.lucene.index.FilterDirectoryReader;
 import org.apache.lucene.index.FilterLeafReader;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.LeafReader;
@@ -386,6 +387,18 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
 
     @Override
     protected void doClose() throws IOException {
+        closeParquetResources();
+        super.doClose();
+    }
+
+    /**
+     * Releases resources owned by this wrapper without closing the underlying Lucene leaf.
+     *
+     * {@link FilterDirectoryReader} closes its wrapped directory, not the synthetic leaf
+     * wrappers returned by its {@code SubReaderWrapper}. The request-scoped directory reader
+     * therefore calls this method explicitly before closing its non-closing delegate.
+     */
+    void closeParquetResources() throws IOException {
         IOException first = null;
         try {
             if (producer != null) {
@@ -393,13 +406,6 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             }
         } catch (IOException e) {
             first = e;
-        }
-        try {
-            super.doClose();
-        } catch (IOException e) {
-            if (first == null) {
-                first = e;
-            }
         }
         if (first != null) {
             throw first;

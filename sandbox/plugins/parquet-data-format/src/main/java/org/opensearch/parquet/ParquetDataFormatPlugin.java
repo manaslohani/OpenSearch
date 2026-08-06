@@ -40,15 +40,16 @@ import org.opensearch.index.engine.dataformat.StoreStrategy;
 import org.opensearch.index.store.PrecomputedChecksumStrategy;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.codec.ParquetDocValuesDirectoryReader;
+import org.opensearch.parquet.codec.ParquetDocValuesProducer;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.engine.ParquetIndexingEngine;
 import org.opensearch.parquet.fields.ArrowSchemaBuilder;
+import org.opensearch.parquet.rest.ParquetLiquidCacheClearRestAction;
 import org.opensearch.parquet.stats.ParquetStatsProvider;
 import org.opensearch.parquet.stats.transport.ParquetNodeStatsActionType;
 import org.opensearch.parquet.stats.transport.ParquetNodeStatsRestAction;
 import org.opensearch.parquet.stats.transport.ParquetNodeStatsTransportAction;
 import org.opensearch.parquet.stats.transport.ParquetStatsActionType;
-import org.opensearch.parquet.rest.ParquetLiquidCacheClearRestAction;
 import org.opensearch.parquet.stats.transport.ParquetStatsRestAction;
 import org.opensearch.parquet.stats.transport.ParquetStatsTransportAction;
 import org.opensearch.parquet.store.ParquetStoreStrategy;
@@ -153,6 +154,16 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin,
                 : environment.tmpDir();
             RustBridge.liquidCacheSetEnabled(true, liquidCacheMaxBytes, liquidCacheDir.toString());
         }
+
+        ParquetDocValuesProducer.setDecodePath(ParquetSettings.DOCVALUES_DECODE_PATH.get(this.settings));
+        ParquetDocValuesProducer.setInitialBatchSize(ParquetSettings.DOCVALUES_INITIAL_BATCH_SIZE.get(this.settings));
+        ParquetDocValuesProducer.setDiagnostics(ParquetSettings.DOCVALUES_DIAGNOSTICS.get(this.settings));
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_DECODE_PATH, ParquetDocValuesProducer::setDecodePath);
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_INITIAL_BATCH_SIZE, ParquetDocValuesProducer::setInitialBatchSize);
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(ParquetSettings.DOCVALUES_DIAGNOSTICS, ParquetDocValuesProducer::setDiagnostics);
 
         // Register virtual pools if allocator is available (arrow-base loaded)
         if (nativeAllocator != null) {

@@ -52,6 +52,7 @@ public class FieldTypeMappingTests extends OpenSearchTestCase {
         // keyword supports SORTED (single) and SORTED_SET (multi).
         FieldTypeMapping.validate("tag", "keyword", DocValuesType.SORTED);
         FieldTypeMapping.validate("tags", "keyword", DocValuesType.SORTED_SET);
+        FieldTypeMapping.validate("message", "text", DocValuesType.BINARY);
     }
 
     public void testValidateRejectsIncompatibleDvType() {

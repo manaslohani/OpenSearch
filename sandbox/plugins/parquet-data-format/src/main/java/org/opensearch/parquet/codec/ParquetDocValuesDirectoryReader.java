@@ -91,12 +91,27 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
 
     @Override
     protected void doClose() throws IOException {
-        // Close the wrapped leaves FIRST: that is what closes each ParquetDocValuesProducer and its
-        // ParquetColumnReaders, and the per-column stats are merged into queryStats during that close.
-        // Only then is the per-query accumulator fully populated and safe to summarize.
+        IOException first = null;
         try {
-            super.doClose();
+            for (LeafReader leaf : getSequentialSubReaders()) {
+                if (leaf instanceof ParquetDocValuesLeafReader parquetLeaf) {
+                    try {
+                        parquetLeaf.closeParquetResources();
+                    } catch (IOException e) {
+                        if (first == null) {
+                            first = e;
+                        }
+                    }
+                }
+            }
         } finally {
+            try {
+                super.doClose();
+            } catch (IOException e) {
+                if (first == null) {
+                    first = e;
+                }
+            }
             // The per-query [PARQUET_DV_QUERY_STATS] summary is TRACE-only so it is NOT emitted during
             // raw-performance runs. Counters are always accumulated (cheap); to see the summary enable
             // the dedicated stats channel: logger.org.opensearch.parquet.stats.query=TRACE.
@@ -108,6 +123,9 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
                 RustBridge.TimingStats tnow = RustBridge.timingSnapshot();
                 timingLog.trace("[PARQUET_DV_TIMING] {}", queryStats.timingSummary(tnow.getNanos(), tnow.decodeNanos(), tnow.putNanos()));
             }
+        }
+        if (first != null) {
+            throw first;
         }
     }
 

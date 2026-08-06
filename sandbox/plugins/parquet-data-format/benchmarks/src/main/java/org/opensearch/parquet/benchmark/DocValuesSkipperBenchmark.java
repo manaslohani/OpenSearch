@@ -128,9 +128,7 @@ public class DocValuesSkipperBenchmark {
         long full = rangeScanFullIteration();
         long skip = rangeScanWithSkipper();
         if (full != expectedCount || skip != expectedCount) {
-            throw new IllegalStateException(
-                "strategy mismatch: full=" + full + " skipper=" + skip + " expected=" + expectedCount
-            );
+            throw new IllegalStateException("strategy mismatch: full=" + full + " skipper=" + skip + " expected=" + expectedCount);
         }
     }
 

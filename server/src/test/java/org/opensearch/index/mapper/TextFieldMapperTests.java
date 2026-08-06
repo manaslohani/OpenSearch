@@ -89,6 +89,9 @@ import org.opensearch.index.analysis.IndexAnalyzers;
 import org.opensearch.index.analysis.NamedAnalyzer;
 import org.opensearch.index.analysis.StandardTokenizerFactory;
 import org.opensearch.index.analysis.TokenFilterFactory;
+import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
+import org.opensearch.index.engine.dataformat.stub.MockDataFormat;
+import org.opensearch.index.fielddata.plain.BinaryIndexFieldData;
 import org.opensearch.index.mapper.TextFieldMapper.TextFieldType;
 import org.opensearch.index.query.MatchPhrasePrefixQueryBuilder;
 import org.opensearch.index.query.MatchPhraseQueryBuilder;
@@ -109,6 +112,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static java.util.Collections.emptyMap;
 import static java.util.stream.Collectors.toList;
@@ -636,6 +640,21 @@ public class TextFieldMapperTests extends MapperTestCase {
             () -> createMapperService(fieldMapping(b -> b.field("type", textFieldName).field("index", false).field("fielddata", true)))
         );
         assertThat(e.getMessage(), containsString("Cannot enable fielddata on a [text] field that is not indexed"));
+    }
+
+    public void testColumnarFormatProvidesExactFielddata() {
+        TextFieldType fieldType = new TextFieldType("field");
+        MockDataFormat format = new MockDataFormat(
+            "columnar",
+            1,
+            Set.of(new FieldTypeCapabilities("text", Set.of(FieldTypeCapabilities.Capability.COLUMNAR_STORAGE)))
+        );
+        fieldType.setCapabilityMap(Map.of(format, Set.of(FieldTypeCapabilities.Capability.COLUMNAR_STORAGE)));
+
+        assertThat(
+            fieldType.fielddataBuilder("test", () -> { throw new UnsupportedOperationException(); }).build(null, null),
+            instanceOf(BinaryIndexFieldData.class)
+        );
     }
 
     public void testFrequencyFilter() throws IOException {

@@ -27,6 +27,7 @@ parquet = "=58.3.0"
 datafusion = "=54.0.0"
 datafusion-expr = "=54.0.0"
 datafusion-datasource = "=54.0.0"
+datafusion-datasource-parquet = "=54.0.0"
 datafusion-common = "=54.0.0"
 datafusion-execution = "=54.0.0"
 datafusion-physical-expr = "=54.0.0"
@@ -75,10 +76,15 @@ criterion = { version = "=0.5.1", features = ["async_tokio"] }
 tokio-metrics = { version = "=0.5.0", features = ["rt"] }
 proptest = "=1.4.0"
 
-# Liquid Cache for byte-level caching
-liquid-cache-datafusion-local = { git = "https://github.com/cocosz/liquid-cache", branch = "lc-opensearch-df54-v2", package = "liquid-cache-datafusion-local" }
-liquid-cache-datafusion = { git = "https://github.com/cocosz/liquid-cache", branch = "lc-opensearch-df54-v2", package = "liquid-cache-datafusion" }
-liquid-cache = { git = "https://github.com/cocosz/liquid-cache", branch = "lc-opensearch-df54-v2", package = "liquid-cache" }
+# Liquid Cache for byte-level caching.
+# Pinned to bharath-techie/liquid-cache branch lc-opensearch-df54-v2.
+# NOTE: rev 1cf6c64 is the current pushed head — it does NOT yet include the
+# uncommitted cold-parity + population-worker changes in
+# ~/Documents/dev/liquid-cache (under review). Bump this rev after those are
+# committed and pushed, or builds will silently lose the cold-path fixes.
+liquid-cache-datafusion-local = { path = "../../../../../liquid-cache/src/datafusion-local", package = "liquid-cache-datafusion-local" } # TEMP-LOCAL
+liquid-cache-datafusion = { path = "../../../../../liquid-cache/src/datafusion", package = "liquid-cache-datafusion" } # TEMP-LOCAL
+liquid-cache = { path = "../../../../../liquid-cache/src/core", package = "liquid-cache" } # TEMP-LOCAL
 # t4 store backing the codec-owned liquid cache (same version liquid-cache core uses).
 t4 = "=0.1.7"
 
@@ -89,6 +95,47 @@ opensearch-repository-s3 = { path = "../../../plugins/native-repository-s3/src/m
 opensearch-repository-gcs = { path = "../../../plugins/native-repository-gcs/src/main/rust" }
 opensearch-repository-azure = { path = "../../../plugins/native-repository-azure/src/main/rust" }
 opensearch-repository-fs = { path = "../../../plugins/native-repository-fs/src/main/rust" }
+
+[patch.crates-io]
+# Forked arrow-rs / datafusion with the doc-values forward-cursor APIs
+# (ParquetRecordBatchReader::skip_rows/read_next_batch, ParquetForwardBatchReader).
+# Branch: docvalues-forward-cursor in both forks.
+arrow = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-arith = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-array = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-buffer = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-cast = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-csv = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-data = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-ipc = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-json = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-ord = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-row = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-schema = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-select = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+arrow-string = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+parquet = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+parquet-variant = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+parquet-variant-compute = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+parquet-variant-json = { git = "https://github.com/bharath-techie/arrow-rs.git", rev = "38b2f7a6a7f58d0dde9f932be1497444f7646a4c" }
+datafusion-common = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-common-runtime = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-datasource = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-datasource-parquet = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-doc = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-execution = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-expr = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-expr-common = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-functions = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-functions-aggregate-common = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-functions-window-common = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-macros = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-physical-expr = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-physical-expr-adapter = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-physical-expr-common = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-physical-plan = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-pruning = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
+datafusion-session = { git = "https://github.com/bharath-techie/datafusion.git", rev = "376902b53a502b19cd0cf5e4e72e4f705ce5d5cd" }
 
 [profile.release]
 lto = true

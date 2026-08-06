@@ -83,6 +83,7 @@ import org.opensearch.index.analysis.IndexAnalyzers;
 import org.opensearch.index.analysis.NamedAnalyzer;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.fielddata.IndexFieldData;
+import org.opensearch.index.fielddata.plain.BinaryIndexFieldData;
 import org.opensearch.index.fielddata.plain.PagedBytesIndexFieldData;
 import org.opensearch.index.mapper.Mapper.TypeParser.ParserContext;
 import org.opensearch.index.query.IntervalBuilder;
@@ -101,6 +102,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.IntPredicate;
 import java.util.function.Supplier;
 
@@ -980,6 +982,9 @@ public class TextFieldMapper extends ParametrizedFieldMapper {
 
         @Override
         public IndexFieldData.Builder fielddataBuilder(String fullyQualifiedIndexName, Supplier<SearchLookup> searchLookup) {
+            if (getCapabilityMap().values().stream().anyMatch(caps -> caps.contains(FieldTypeCapabilities.Capability.COLUMNAR_STORAGE))) {
+                return new BinaryIndexFieldData.Builder(name(), CoreValuesSourceType.BYTES);
+            }
             if (fielddata == false) {
                 throw new IllegalArgumentException(
                     "Text fields are not optimised for operations that require per-document "
@@ -997,6 +1002,11 @@ public class TextFieldMapper extends ParametrizedFieldMapper {
                 filter.minSegmentSize,
                 CoreValuesSourceType.BYTES
             );
+        }
+
+        @Override
+        public Set<FieldTypeCapabilities.Capability> optionalCapabilities() {
+            return Set.of(FieldTypeCapabilities.Capability.COLUMNAR_STORAGE);
         }
 
     }

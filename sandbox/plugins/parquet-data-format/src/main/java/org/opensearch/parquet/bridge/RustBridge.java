@@ -65,6 +65,20 @@ public class RustBridge {
     private static final MethodHandle GET_COLUMN_NUM_PAGES;
     private static final MethodHandle GET_COLUMN_PAGE_INDEX;
     private static final MethodHandle DECODE_PAGE_AT_ROW;
+    private static final MethodHandle DF_OPEN_ITER;
+    private static final MethodHandle DF_CLOSE_ITER;
+    private static final MethodHandle DF_RESET_ITER;
+    private static final MethodHandle DF_OPEN_ITER_COUNT;
+    private static final MethodHandle DF_ROW_COUNT;
+    private static final MethodHandle DF_PAGE_COUNT;
+    private static final MethodHandle DF_PAGE_INDEX;
+    private static final MethodHandle DF_DIAGNOSTICS_RESET;
+    private static final MethodHandle DF_DIAGNOSTICS_SNAPSHOT;
+    private static final MethodHandle DF_NEXT_BATCH;
+    private static final MethodHandle DF_NEXT_BINARY_BATCH;
+    private static final MethodHandle DF_NEXT_REPEATED_BATCH;
+    private static final MethodHandle DF_NEXT_REPEATED_BINARY_BATCH;
+    private static final int DF_DIAGNOSTIC_FIELD_COUNT = 15;
 
     /**
      * Positive status code returned by the column-reader read/decode functions
@@ -73,7 +87,9 @@ public class RustBridge {
      * is distinct from the {@code < 0} error-pointer convention (a small negative
      * constant would be dereferenced as an error pointer and corrupt memory).
      */
+    public static final long RC_OK = 0L;
     public static final long RC_OVERFLOW = 1L;
+    public static final long RC_EOF = 2L;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -420,6 +436,129 @@ public class RustBridge {
                 ValueLayout.JAVA_LONG,  // out_byte_offsets_cap
                 ValueLayout.ADDRESS,    // out_presence_bitset
                 ValueLayout.JAVA_LONG   // out_presence_bits_cap
+            )
+        );
+        DF_OPEN_ITER = linker.downcallHandle(
+            lib.find("parquet_df_open_iter").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,    // file_ptr
+                ValueLayout.JAVA_LONG,  // file_len
+                ValueLayout.ADDRESS,    // col_ptr
+                ValueLayout.JAVA_LONG,  // col_len
+                ValueLayout.JAVA_LONG   // initial_batch_size
+            )
+        );
+        DF_CLOSE_ITER = linker.downcallHandle(
+            lib.find("parquet_df_close_iter").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+        DF_RESET_ITER = linker.downcallHandle(
+            lib.find("parquet_df_reset_iter").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+        DF_OPEN_ITER_COUNT = linker.downcallHandle(
+            lib.find("parquet_df_open_iter_count").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG)
+        );
+        DF_ROW_COUNT = linker.downcallHandle(
+            lib.find("parquet_df_row_count").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+        DF_PAGE_COUNT = linker.downcallHandle(
+            lib.find("parquet_df_page_count").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+        DF_PAGE_INDEX = linker.downcallHandle(
+            lib.find("parquet_df_page_index").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG, // handle
+                ValueLayout.ADDRESS,   // out_first_row
+                ValueLayout.ADDRESS,   // out_file_offset
+                ValueLayout.ADDRESS,   // out_compressed_size
+                ValueLayout.ADDRESS,   // out_null_count
+                ValueLayout.ADDRESS,   // out_min_long
+                ValueLayout.ADDRESS,   // out_max_long
+                ValueLayout.JAVA_LONG, // out_buf_capacity
+                ValueLayout.ADDRESS    // out_actual_pages
+            )
+        );
+        DF_DIAGNOSTICS_RESET = linker.downcallHandle(
+            lib.find("parquet_df_diagnostics_reset").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG)
+        );
+        DF_DIAGNOSTICS_SNAPSHOT = linker.downcallHandle(
+            lib.find("parquet_df_diagnostics_snapshot").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG)
+        );
+        DF_NEXT_BATCH = linker.downcallHandle(
+            lib.find("parquet_df_next_batch").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,  // handle
+                ValueLayout.JAVA_LONG,  // row
+                ValueLayout.ADDRESS,    // out_first_row
+                ValueLayout.ADDRESS,    // out_last_row
+                ValueLayout.ADDRESS,    // out_value_buf
+                ValueLayout.JAVA_LONG,  // out_value_buf_cap
+                ValueLayout.ADDRESS,    // out_value_actual_len
+                ValueLayout.ADDRESS,    // out_presence_bitset
+                ValueLayout.JAVA_LONG,  // out_presence_bits_cap
+                ValueLayout.ADDRESS,    // out_values_addr (borrowed Arrow buffer)
+                ValueLayout.ADDRESS,    // out_validity_addr (borrowed validity bitmap)
+                ValueLayout.ADDRESS,    // out_validity_bit_offset
+                ValueLayout.ADDRESS     // out_value_kind (0 = copied)
+            )
+        );
+        DF_NEXT_BINARY_BATCH = linker.downcallHandle(
+            lib.find("parquet_df_next_binary_batch").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG, // handle
+                ValueLayout.JAVA_LONG, // row
+                ValueLayout.ADDRESS,   // out_first_row
+                ValueLayout.ADDRESS,   // out_last_row
+                ValueLayout.ADDRESS,   // out_value_buf
+                ValueLayout.JAVA_LONG, // out_value_buf_cap
+                ValueLayout.ADDRESS,   // out_value_actual_len
+                ValueLayout.ADDRESS,   // out_byte_offsets
+                ValueLayout.JAVA_LONG, // out_byte_offsets_cap
+                ValueLayout.ADDRESS,   // out_presence_bitset
+                ValueLayout.JAVA_LONG  // out_presence_bits_cap
+            )
+        );
+        DF_NEXT_REPEATED_BATCH = linker.downcallHandle(
+            lib.find("parquet_df_next_repeated_batch").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG, // handle
+                ValueLayout.JAVA_LONG, // row
+                ValueLayout.ADDRESS,   // out_first_row
+                ValueLayout.ADDRESS,   // out_last_row
+                ValueLayout.ADDRESS,   // out_values
+                ValueLayout.JAVA_LONG, // out_values_cap
+                ValueLayout.ADDRESS,   // out_value_count
+                ValueLayout.ADDRESS,   // out_row_offsets
+                ValueLayout.JAVA_LONG  // out_row_offsets_cap
+            )
+        );
+        DF_NEXT_REPEATED_BINARY_BATCH = linker.downcallHandle(
+            lib.find("parquet_df_next_repeated_binary_batch").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG, // handle
+                ValueLayout.JAVA_LONG, // row
+                ValueLayout.ADDRESS,   // out_first_row
+                ValueLayout.ADDRESS,   // out_last_row
+                ValueLayout.ADDRESS,   // out_value_buf
+                ValueLayout.JAVA_LONG, // out_value_buf_cap
+                ValueLayout.ADDRESS,   // out_value_actual_len
+                ValueLayout.ADDRESS,   // out_element_offsets
+                ValueLayout.JAVA_LONG, // out_element_offsets_cap
+                ValueLayout.ADDRESS,   // out_value_count
+                ValueLayout.ADDRESS,   // out_row_offsets
+                ValueLayout.JAVA_LONG  // out_row_offsets_cap
             )
         );
     }
@@ -922,7 +1061,8 @@ public class RustBridge {
      * @param misses liquid {@code get} found nothing, so the caller decoded from Parquet
      * @param puts   decoded pages inserted into liquid
      */
-    public record LiquidCacheStats(long hits, long misses, long puts) {}
+    public record LiquidCacheStats(long hits, long misses, long puts) {
+    }
 
     /**
      * Snapshots the codec liquid cache event counters. Cheap (three relaxed atomic loads on the
@@ -944,7 +1084,8 @@ public class RustBridge {
     }
 
     /** Cumulative page-decode phase timers (nanos since process start): get/decode/put. */
-    public record TimingStats(long getNanos, long decodeNanos, long putNanos) {}
+    public record TimingStats(long getNanos, long decodeNanos, long putNanos) {
+    }
 
     /** Enables/disables native page-decode phase timing. Called when the timing logger toggles. */
     public static void timingSetEnabled(boolean enabled) {
@@ -958,11 +1099,7 @@ public class RustBridge {
             var d = call.longOut();
             var p = call.longOut();
             call.invoke(TIMING_SNAPSHOT, g, d, p);
-            return new TimingStats(
-                g.get(ValueLayout.JAVA_LONG, 0),
-                d.get(ValueLayout.JAVA_LONG, 0),
-                p.get(ValueLayout.JAVA_LONG, 0)
-            );
+            return new TimingStats(g.get(ValueLayout.JAVA_LONG, 0), d.get(ValueLayout.JAVA_LONG, 0), p.get(ValueLayout.JAVA_LONG, 0));
         }
     }
 
@@ -1071,6 +1208,227 @@ public class RustBridge {
             outByteOffsetsCap,
             outPresenceBitset,
             outPresenceBitsCap
+        );
+    }
+
+    /** Opens a forward-only DataFusion/Arrow cursor over one Parquet column. */
+    public static long dfOpenIter(String file, String column, int initialBatchSize) throws IOException {
+        try (var call = new NativeCall()) {
+            var f = call.str(file);
+            var c = call.str(column);
+            return call.invokeIO(DF_OPEN_ITER, f.segment(), f.len(), c.segment(), c.len(), initialBatchSize);
+        }
+    }
+
+    /** Releases a DataFusion/Arrow cursor. */
+    public static void dfCloseIter(long handle) throws IOException {
+        invokeChecked(DF_CLOSE_ITER, handle);
+    }
+
+    /** Rewinds a cursor to row zero, retaining metadata, page index and cache registrations. */
+    static void dfResetIter(long handle) throws IOException {
+        invokeChecked(DF_RESET_ITER, handle);
+    }
+
+    /** Number of live DataFusion/Arrow cursors, for lifecycle tests. */
+    public static long dfOpenIterCount() {
+        return NativeCall.invokeStatic(DF_OPEN_ITER_COUNT);
+    }
+
+    /** Total physical rows visible to the retained cursor. */
+    static long dfRowCount(long handle) throws IOException {
+        return invokeChecked(DF_ROW_COUNT, handle);
+    }
+
+    /** Number of OffsetIndex pages for the cursor's projected column. */
+    static long dfPageCount(long handle) throws IOException {
+        return invokeChecked(DF_PAGE_COUNT, handle);
+    }
+
+    /** Copies scoped OffsetIndex and ColumnIndex values into parallel output arrays. */
+    static long dfPageIndex(
+        long handle,
+        MemorySegment outFirstRow,
+        MemorySegment outFileOffset,
+        MemorySegment outCompressedSize,
+        MemorySegment outNullCount,
+        MemorySegment outMinLong,
+        MemorySegment outMaxLong,
+        long capacity,
+        MemorySegment outActualPages
+    ) throws IOException {
+        return invokeChecked(
+            DF_PAGE_INDEX,
+            handle,
+            outFirstRow,
+            outFileOffset,
+            outCompressedSize,
+            outNullCount,
+            outMinLong,
+            outMaxLong,
+            capacity,
+            outActualPages
+        );
+    }
+
+    /** Aggregate counters collected between diagnostics reset and snapshot. */
+    public record DataFusionDocValuesStats(long cursorOpens, long batchCalls, long sequentialBatches, long sparseBatches, long decodedRows,
+        long skippedRows, long overflowProbes, long rangeReads, long rangeBytes, long ioNanos, long pageSamples, long pageRowsTotal,
+        long pageRowsMin, long pageRowsMax, long liveCursors) {
+        private static DataFusionDocValuesStats from(long[] values) {
+            return new DataFusionDocValuesStats(
+                values[0],
+                values[1],
+                values[2],
+                values[3],
+                values[4],
+                values[5],
+                values[6],
+                values[7],
+                values[8],
+                values[9],
+                values[10],
+                values[11],
+                values[12],
+                values[13],
+                values[14]
+            );
+        }
+    }
+
+    /** Starts a fresh process-wide DataFusion DocValues measurement window. */
+    public static void dfDiagnosticsReset() {
+        NativeCall.invokeStatic(DF_DIAGNOSTICS_RESET);
+    }
+
+    /** Stops the current measurement window and returns its aggregate counters. */
+    public static DataFusionDocValuesStats dfDiagnosticsSnapshot() {
+        try (var call = new NativeCall()) {
+            MemorySegment values = call.buf(DF_DIAGNOSTIC_FIELD_COUNT * Long.BYTES);
+            call.invoke(DF_DIAGNOSTICS_SNAPSHOT, values, DF_DIAGNOSTIC_FIELD_COUNT);
+            return DataFusionDocValuesStats.from(values.toArray(ValueLayout.JAVA_LONG));
+        }
+    }
+
+    /** Reads the adaptive batch beginning at {@code row}. */
+    static long dfNextBatch(
+        long handle,
+        long row,
+        MemorySegment outFirstRow,
+        MemorySegment outLastRow,
+        MemorySegment outValueBuf,
+        long outValueBufCap,
+        MemorySegment outValueActualLen,
+        MemorySegment outPresenceBitset,
+        long outPresenceBitsCap,
+        MemorySegment outValuesAddr,
+        MemorySegment outValidityAddr,
+        MemorySegment outValidityBitOffset,
+        MemorySegment outValueKind
+    ) throws IOException {
+        return invokeChecked(
+            DF_NEXT_BATCH,
+            handle,
+            row,
+            outFirstRow,
+            outLastRow,
+            outValueBuf,
+            outValueBufCap,
+            outValueActualLen,
+            outPresenceBitset,
+            outPresenceBitsCap,
+            outValuesAddr,
+            outValidityAddr,
+            outValidityBitOffset,
+            outValueKind
+        );
+    }
+
+    /** Reads an adaptive variable-width batch beginning at {@code row}. */
+    static long dfNextBinaryBatch(
+        long handle,
+        long row,
+        MemorySegment outFirstRow,
+        MemorySegment outLastRow,
+        MemorySegment outValueBuf,
+        long outValueBufCap,
+        MemorySegment outValueActualLen,
+        MemorySegment outByteOffsets,
+        long outByteOffsetsCap,
+        MemorySegment outPresenceBitset,
+        long outPresenceBitsCap
+    ) throws IOException {
+        return invokeChecked(
+            DF_NEXT_BINARY_BATCH,
+            handle,
+            row,
+            outFirstRow,
+            outLastRow,
+            outValueBuf,
+            outValueBufCap,
+            outValueActualLen,
+            outByteOffsets,
+            outByteOffsetsCap,
+            outPresenceBitset,
+            outPresenceBitsCap
+        );
+    }
+
+    /** Reads an adaptive repeated primitive batch beginning at {@code row}. */
+    static long dfNextRepeatedBatch(
+        long handle,
+        long row,
+        MemorySegment outFirstRow,
+        MemorySegment outLastRow,
+        MemorySegment outValues,
+        long outValuesCap,
+        MemorySegment outValueCount,
+        MemorySegment outRowOffsets,
+        long outRowOffsetsCap
+    ) throws IOException {
+        return invokeChecked(
+            DF_NEXT_REPEATED_BATCH,
+            handle,
+            row,
+            outFirstRow,
+            outLastRow,
+            outValues,
+            outValuesCap,
+            outValueCount,
+            outRowOffsets,
+            outRowOffsetsCap
+        );
+    }
+
+    /** Reads an adaptive repeated variable-width batch beginning at {@code row}. */
+    static long dfNextRepeatedBinaryBatch(
+        long handle,
+        long row,
+        MemorySegment outFirstRow,
+        MemorySegment outLastRow,
+        MemorySegment outValueBuf,
+        long outValueBufCap,
+        MemorySegment outValueActualLen,
+        MemorySegment outElementOffsets,
+        long outElementOffsetsCap,
+        MemorySegment outValueCount,
+        MemorySegment outRowOffsets,
+        long outRowOffsetsCap
+    ) throws IOException {
+        return invokeChecked(
+            DF_NEXT_REPEATED_BINARY_BATCH,
+            handle,
+            row,
+            outFirstRow,
+            outLastRow,
+            outValueBuf,
+            outValueBufCap,
+            outValueActualLen,
+            outElementOffsets,
+            outElementOffsetsCap,
+            outValueCount,
+            outRowOffsets,
+            outRowOffsetsCap
         );
     }
 

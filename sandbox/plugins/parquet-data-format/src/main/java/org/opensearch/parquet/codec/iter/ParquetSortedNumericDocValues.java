@@ -9,7 +9,8 @@
 package org.opensearch.parquet.codec.iter;
 
 import org.apache.lucene.index.SortedNumericDocValues;
-import org.opensearch.parquet.bridge.ParquetColumnReader;
+import org.apache.lucene.util.LongsRef;
+import org.opensearch.parquet.bridge.NumericPageReader;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -17,22 +18,23 @@ import java.util.Arrays;
 /**
  * {@link SortedNumericDocValues} over a multi-valued Parquet primitive column.
  *
- * <p>Repeated columns are not page-cacheable (the page decoder targets single-valued
- * columns), so each {@link #advanceExact(int)} reads the row's repeated values via the
- * column reader's slow path, then sorts them ascending to satisfy Lucene's contract. The
- * per-doc values are buffered in a reused array (Layer 5) and walked by {@link #nextValue()}.
+ * <p>Each {@link #advanceExact(int)} reads the row's repeated values from the resident adaptive
+ * batch, loading the next batch when necessary, then sorts them ascending to satisfy Lucene's
+ * contract. The per-doc values are buffered in a reused array and walked by
+ * {@link #nextValue()}.
  */
 public final class ParquetSortedNumericDocValues extends SortedNumericDocValues {
 
-    private final ParquetColumnReader reader;
+    private final NumericPageReader reader;
     private final int maxDoc;
 
     private int doc = -1;
-    private long[] values = new long[0];
+    /** Reused per-doc value buffer; the reader fills it in place, so steady state allocates nothing. */
+    private final LongsRef values = new LongsRef(8);
     private int count;
     private int cursor;
 
-    public ParquetSortedNumericDocValues(ParquetColumnReader reader, int maxDoc) {
+    public ParquetSortedNumericDocValues(NumericPageReader reader, int maxDoc) {
         this.reader = reader;
         this.maxDoc = maxDoc;
     }
@@ -46,18 +48,14 @@ public final class ParquetSortedNumericDocValues extends SortedNumericDocValues 
             return false;
         }
         doc = target;
-        ParquetColumnReader.RepeatedValues rv = reader.readRepeatedAtRow(target);
-        count = rv.count();
+        reader.readRepeatedLongsAtRow(target, values);
+        count = values.length;
         cursor = 0;
         if (count == 0) {
             return false; // empty list = missing.
         }
-        if (values.length < count) {
-            values = new long[count];
-        }
-        System.arraycopy(rv.bits(), 0, values, 0, count);
         // Lucene's SortedNumeric contract requires ascending order.
-        Arrays.sort(values, 0, count);
+        Arrays.sort(values.longs, 0, count);
         return true;
     }
 
@@ -68,7 +66,7 @@ public final class ParquetSortedNumericDocValues extends SortedNumericDocValues 
 
     @Override
     public long nextValue() {
-        return values[cursor++];
+        return values.longs[cursor++];
     }
 
     @Override

@@ -8,6 +8,8 @@
 
 package org.opensearch.parquet.codec;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.codecs.DocValuesProducer;
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.DocValuesSkipper;
@@ -20,6 +22,8 @@ import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
+import org.opensearch.parquet.ParquetSettings;
+import org.opensearch.parquet.bridge.DataFusionColumnReader;
 import org.opensearch.parquet.bridge.ParquetColumnReader;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
 import org.opensearch.parquet.bridge.RustBridge;
@@ -50,15 +54,65 @@ import java.util.Map;
  * scope.
  *
  * <h2>Laziness and lifecycle</h2>
- * The constructor resolves the Parquet file and checks the invariant but opens no native
- * column-reader handle. Each {@code getX(field)} lazily opens (and caches) a
- * {@link ParquetColumnReader}; {@code getSorted}/{@code getSortedSet} additionally build (and
- * cache) an {@link OrdinalTable} on first access. {@link #close()} releases every reader,
- * ordinal table, and the shared {@link BufferPool}, and is idempotent.
+ * The constructor resolves the Parquet file and checks the invariant but opens no column-reader
+ * handle. Each {@code getX(field)} lazily opens and caches the reader selected by the configured
+ * decode path; {@code getSorted}/{@code getSortedSet} additionally build and cache an
+ * {@link OrdinalTable} on first access. {@link #close()} releases every reader, ordinal table,
+ * and the shared {@link BufferPool}, and is idempotent.
  *
  * <p>Not thread-safe: one producer serves one segment on one query thread.
  */
 public final class ParquetDocValuesProducer extends DocValuesProducer {
+
+    private static final Logger logger = LogManager.getLogger(ParquetDocValuesProducer.class);
+    private static volatile boolean useDataFusionDecodePath;
+    private static volatile int dataFusionInitialBatchSize = 32;
+    private static volatile boolean dataFusionDiagnostics;
+
+    /** Updates the node-wide DocValues decode path. */
+    public static void setDecodePath(String decodePath) {
+        useDataFusionDecodePath = ParquetSettings.DECODE_PATH_DATAFUSION.equals(decodePath);
+    }
+
+    /** Updates the starting window used by newly opened DataFusion cursors. */
+    public static void setInitialBatchSize(int initialBatchSize) {
+        dataFusionInitialBatchSize = initialBatchSize;
+    }
+
+    /** Starts or snapshots a process-wide DataFusion cursor diagnostics window. */
+    public static synchronized void setDiagnostics(boolean diagnostics) {
+        if (diagnostics == dataFusionDiagnostics) {
+            return;
+        }
+        if (diagnostics) {
+            RustBridge.dfDiagnosticsReset();
+        } else {
+            RustBridge.DataFusionDocValuesStats stats = RustBridge.dfDiagnosticsSnapshot();
+            double pageRowsAverage = stats.pageSamples() == 0 ? 0.0 : (double) stats.pageRowsTotal() / stats.pageSamples();
+            logger.info(
+                "[df_docvalues_stats] initial_batch={} opens={} batches={} sequential={} sparse={} decoded_rows={} skipped_rows={} "
+                    + "overflow_probes={} range_reads={} range_bytes={} io_ms={} page_samples={} page_rows_avg={} page_rows_min={} "
+                    + "page_rows_max={} live_cursors={}",
+                dataFusionInitialBatchSize,
+                stats.cursorOpens(),
+                stats.batchCalls(),
+                stats.sequentialBatches(),
+                stats.sparseBatches(),
+                stats.decodedRows(),
+                stats.skippedRows(),
+                stats.overflowProbes(),
+                stats.rangeReads(),
+                stats.rangeBytes(),
+                stats.ioNanos() / 1_000_000.0,
+                stats.pageSamples(),
+                pageRowsAverage,
+                stats.pageRowsMin(),
+                stats.pageRowsMax(),
+                stats.liveCursors()
+            );
+        }
+        dataFusionDiagnostics = diagnostics;
+    }
 
     private final Path parquetFile;
     private final MapperService mapperService;
@@ -67,6 +121,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
 
     private final BufferPool bufferPool = new BufferPool();
     private final Map<String, ParquetColumnReader> columnReaders = new HashMap<>();
+    private final Map<String, DataFusionColumnReader> dataFusionColumnReaders = new HashMap<>();
     private final Map<String, OrdinalTable> ordinalTables = new HashMap<>();
 
     /** Optional per-query accumulator; propagated to each column reader so its stats roll up at close. */
@@ -136,6 +191,9 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     public NumericDocValues getNumeric(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.NUMERIC);
+        if (useDataFusionDecodePath) {
+            return new ParquetNumericDocValues(dataFusionReaderFor(field, false), maxDoc);
+        }
         ParquetColumnReader reader = readerFor(field, false);
         return new ParquetNumericDocValues(reader, maxDoc);
     }
@@ -144,6 +202,9 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.SORTED_NUMERIC);
+        if (useDataFusionDecodePath) {
+            return new ParquetSortedNumericDocValues(dataFusionReaderFor(field, true), maxDoc);
+        }
         ParquetColumnReader reader = readerFor(field, true);
         return new ParquetSortedNumericDocValues(reader, maxDoc);
     }
@@ -152,6 +213,9 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     public BinaryDocValues getBinary(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.BINARY);
+        if (useDataFusionDecodePath) {
+            return new ParquetBinaryDocValues(dataFusionReaderFor(field, false), maxDoc);
+        }
         ParquetColumnReader reader = readerFor(field, false);
         return new ParquetBinaryDocValues(reader, maxDoc);
     }
@@ -188,6 +252,14 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         ParquetPhysicalType phys = physicalType(field);
         if (phys != ParquetPhysicalType.INT32 && phys != ParquetPhysicalType.INT64 && phys != ParquetPhysicalType.BOOL) {
             return null;
+        }
+        if (field.getDocValuesType() == DocValuesType.SORTED_NUMERIC) {
+            // Repeated values may span Parquet pages, so OffsetIndex page rows do not
+            // define independent Lucene document ranges. Do not expose unsafe stats.
+            return null;
+        }
+        if (useDataFusionDecodePath) {
+            return new ParquetDocValuesSkipper(dataFusionReaderFor(field, false).pageIndex(), maxDoc);
         }
         // Match the repeated flag the field's DV accessor will use — readerFor caches by field
         // name, so opening here with a mismatched flag would poison the cache for the accessor.
@@ -236,7 +308,20 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
                 // Suppress per-reader errors so every reader gets a chance to close.
             }
         }
+        for (DataFusionColumnReader reader : dataFusionColumnReaders.values()) {
+            try {
+                reader.close();
+            } catch (IOException e) {
+                if (first == null) {
+                    first = e;
+                }
+            } catch (RuntimeException e) {
+                // Suppress so every reader gets a chance to close, but keep the failure visible.
+                logger.warn("Failed to close DataFusion column reader for [{}]", parquetFile, e);
+            }
+        }
         columnReaders.clear();
+        dataFusionColumnReaders.clear();
         ordinalTables.clear();
         bufferPool.close();
         if (first != null) {
@@ -286,9 +371,31 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         return reader;
     }
 
+    private DataFusionColumnReader dataFusionReaderFor(FieldInfo field, boolean repeated) throws IOException {
+        DataFusionColumnReader reader = dataFusionColumnReaders.get(field.getName());
+        if (reader == null) {
+            reader = DataFusionColumnReader.open(
+                parquetFile,
+                field.getName(),
+                physicalType(field),
+                repeated,
+                bufferPool,
+                dataFusionInitialBatchSize
+            );
+            dataFusionColumnReaders.put(field.getName(), reader);
+        }
+        return reader;
+    }
+
     private OrdinalTable ordinalTableFor(FieldInfo field, boolean multiValued) throws IOException {
         OrdinalTable table = ordinalTables.get(field.getName());
         if (table == null) {
+            if (useDataFusionDecodePath) {
+                DataFusionColumnReader reader = dataFusionReaderFor(field, multiValued);
+                table = multiValued ? OrdinalTable.buildMultiValued(reader, maxDoc) : OrdinalTable.buildSingleValued(reader, maxDoc);
+                ordinalTables.put(field.getName(), table);
+                return table;
+            }
             ParquetColumnReader reader = readerFor(field, multiValued);
             table = multiValued ? OrdinalTable.buildMultiValued(reader, maxDoc) : OrdinalTable.buildSingleValued(reader, maxDoc);
             ordinalTables.put(field.getName(), table);

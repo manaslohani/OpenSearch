@@ -26,6 +26,7 @@ pub mod cache;
 pub mod cancellation;
 pub mod cross_rt_stream;
 pub mod datafusion_query_config;
+pub mod doc_values_cursor;
 pub mod executor;
 pub mod ffm;
 pub mod helper;
@@ -59,7 +60,6 @@ pub mod task_monitors;
 pub mod scoped_index_optimizer;
 pub mod scoped_page_index_reader;
 
-#[cfg(target_os = "linux")]
 pub mod liquid_cache;
 
 // Path aliases — old module names still resolve unchanged.

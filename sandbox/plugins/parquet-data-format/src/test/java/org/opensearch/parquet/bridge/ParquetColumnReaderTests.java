@@ -26,6 +26,7 @@ import org.opensearch.parquet.codec.ParquetPhysicalType;
 import org.opensearch.parquet.codec.cache.BufferPool;
 import org.opensearch.parquet.codec.cache.ColumnPageIndex;
 import org.opensearch.parquet.codec.cache.PageCache;
+import org.opensearch.parquet.codec.iter.ParquetNumericDocValues;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.io.IOException;
@@ -141,6 +142,77 @@ public class ParquetColumnReaderTests extends OpenSearchTestCase {
             r.close(); // idempotent
             assertEquals(before, RustBridge.openColumnReaderCount());
         }
+    }
+
+    public void testDataFusionReaderUsesAdaptiveBatchesAndSharedNumericIterator() throws Exception {
+        int rowCount = 100;
+        int[] ids = new int[rowCount];
+        String[] names = new String[rowCount];
+        long[] scores = new long[rowCount];
+        for (int i = 0; i < rowCount; i++) {
+            ids[i] = i;
+            names[i] = "value-" + i;
+            scores[i] = i * 10L;
+        }
+        Path file = writeFile(ids, names, scores);
+        long before = RustBridge.dfOpenIterCount();
+
+        try (BufferPool pool = new BufferPool(); DataFusionColumnReader reader = DataFusionColumnReader.open(file, "id", pool)) {
+            assertEquals(before + 1, RustBridge.dfOpenIterCount());
+            ParquetNumericDocValues values = new ParquetNumericDocValues(reader, rowCount);
+
+            assertTrue(values.advanceExact(0));
+            assertEquals(0L, values.longValue());
+            assertEquals(0L, reader.cache().firstRow);
+            assertEquals(31L, reader.cache().lastRow);
+
+            assertTrue(values.advanceExact(32));
+            assertEquals(32L, values.longValue());
+            assertEquals(32L, reader.cache().firstRow);
+            assertEquals(95L, reader.cache().lastRow);
+
+            assertTrue(values.advanceExact(99));
+            assertEquals(99L, values.longValue());
+            assertEquals(99L, reader.cache().firstRow);
+            assertEquals(99L, reader.cache().lastRow);
+        }
+        assertEquals(before, RustBridge.dfOpenIterCount());
+    }
+
+    public void testDataFusionReaderReopensForBackwardSeeks() throws Exception {
+        int rowCount = 100;
+        int[] ids = new int[rowCount];
+        String[] names = new String[rowCount];
+        long[] scores = new long[rowCount];
+        for (int i = 0; i < rowCount; i++) {
+            ids[i] = i;
+            names[i] = "value-" + i;
+            scores[i] = i * 10L;
+        }
+        Path file = writeFile(ids, names, scores);
+        long before = RustBridge.dfOpenIterCount();
+
+        try (BufferPool pool = new BufferPool(); DataFusionColumnReader reader = DataFusionColumnReader.open(file, "id", pool)) {
+            // Two iterators over the same column share one native cursor — e.g. a parent
+            // aggregation and a filtered sub-aggregation advancing at different rates.
+            ParquetNumericDocValues leading = new ParquetNumericDocValues(reader, rowCount);
+            ParquetNumericDocValues trailing = new ParquetNumericDocValues(reader, rowCount);
+
+            assertTrue(leading.advanceExact(90));
+            assertEquals(90L, leading.longValue());
+
+            // The forward-only cursor is past row 5; the reader must reopen, not fail.
+            assertTrue(trailing.advanceExact(5));
+            assertEquals(5L, trailing.longValue());
+
+            // Forward progress still works after the reopen.
+            assertTrue(leading.advanceExact(95));
+            assertEquals(95L, leading.longValue());
+
+            // Reopen swaps cursors one-for-one: exactly one remains live.
+            assertEquals(before + 1, RustBridge.dfOpenIterCount());
+        }
+        assertEquals(before, RustBridge.dfOpenIterCount());
     }
 
     // ── helpers ──

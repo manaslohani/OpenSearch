@@ -10,6 +10,8 @@ package org.opensearch.parquet.bridge;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.util.ArrayUtil;
+import org.apache.lucene.util.LongsRef;
 import org.opensearch.parquet.codec.ParquetPhysicalType;
 import org.opensearch.parquet.codec.cache.BufferPool;
 import org.opensearch.parquet.codec.cache.CacheStats;
@@ -42,7 +44,7 @@ import java.nio.file.Path;
  * are read from the out-parameters, larger buffers are obtained from the pool, and the call
  * is retried exactly once.
  */
-public final class ParquetColumnReader implements Closeable {
+public final class ParquetColumnReader implements Closeable, NumericPageReader, BinaryPageReader {
 
     // Dedicated timing channel — separate from the query-stats logger so timing (which takes
     // nanoTime) can be toggled independently. When not at TRACE, no nanoTime is taken.
@@ -246,12 +248,23 @@ public final class ParquetColumnReader implements Closeable {
         return new RepeatedValues(out);
     }
 
+    @Override
+    public void readRepeatedLongsAtRow(long row, LongsRef dst) throws IOException {
+        RepeatedValues values = readRepeatedAtRow(row);
+        int count = values.count();
+        dst.longs = ArrayUtil.grow(dst.longs, count);
+        dst.offset = 0;
+        dst.length = count;
+        System.arraycopy(values.bits(), 0, dst.longs, 0, count);
+    }
+
     /**
      * Slow-path repeated read of a {@code BYTE_ARRAY} column at global {@code row}. Returns one
      * {@code byte[]} per repeated value in row order, or {@code null} when the row's list is
      * empty. Follows the grow-and-retry overflow protocol for both the element-count buffer
      * and the concatenated-bytes buffer.
      */
+    @Override
     public byte[][] readRepeatedBytesAtRow(long row) throws IOException {
         ensureOpen();
         stats.slowRepeatedRead();

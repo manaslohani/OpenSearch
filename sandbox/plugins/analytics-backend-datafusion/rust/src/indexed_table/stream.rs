@@ -1063,7 +1063,7 @@ impl IndexedStream {
 
                     // Candidate selectivity for this RG (fraction of rows matched). Passed to
                     // create_row_selection_stream so the liquid-cache engagement gate can decide
-                    // whether to route the scan through LiquidParquetSource (Linux only).
+                    // whether to route the scan through LiquidParquetSource.
                     let selectivity = candidates.len() as f64 / rg.num_rows as f64;
 
                     // Metrics: track which regime we landed in, using the

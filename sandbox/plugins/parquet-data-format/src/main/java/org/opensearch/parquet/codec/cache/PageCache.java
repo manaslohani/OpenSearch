@@ -31,16 +31,35 @@ import java.lang.foreign.ValueLayout;
  */
 public final class PageCache {
 
+    /** {@link #values} holds one {@code long} of raw bits per row (copy mode and INT64/f64 borrows). */
+    public static final int KIND_LONG = 1;
+    /** {@link #values} holds one sign-extending {@code int} per row (borrowed Int32/Date32/Time32). */
+    public static final int KIND_INT = 2;
+    /** {@link #values} holds one zero-extending {@code int} per row (borrowed UInt32/Float32 bits). */
+    public static final int KIND_UINT_BITS = 3;
+    /** {@link #values} holds one sign-extending {@code short} per row (borrowed Int16). */
+    public static final int KIND_SHORT = 4;
+    /** {@link #values} holds one zero-extending {@code short} per row (borrowed UInt16). */
+    public static final int KIND_USHORT = 5;
+    /** {@link #values} holds one sign-extending {@code byte} per row (borrowed Int8). */
+    public static final int KIND_BYTE = 6;
+    /** {@link #values} holds one zero-extending {@code byte} per row (borrowed UInt8). */
+    public static final int KIND_UBYTE = 7;
+
     /** Inclusive global index of the first row in the cached page. */
     public long firstRow;
     /** Inclusive global index of the last row in the cached page. */
     public long lastRow;
 
     /**
-     * Off-heap view of the decoded raw bits, one {@code long} slot per row (primitive
-     * columns). Null for binary columns.
+     * Off-heap view of the decoded values (primitive columns): either the pooled copy
+     * (one {@code long} per row) or a borrowed Arrow buffer read in place according to
+     * {@link #valueKind}. Null for binary columns.
      */
     public MemorySegment values;
+
+    /** Element interpretation of {@link #values}; one of the {@code KIND_*} constants. */
+    public int valueKind = KIND_LONG;
 
     /** Backing byte buffer for binary columns (concatenated value bytes). Null for primitives. */
     public byte[] byteBuf;
@@ -48,10 +67,20 @@ public final class PageCache {
     public int[] byteOffsets;
 
     /**
-     * Off-heap view of the packed presence bitset: bit {@code i} set when row
-     * {@code firstRow + i} is non-null. One {@code long} word per 64 rows.
+     * Repeated columns: CSR offsets from rows to flattened primitive/binary elements.
+     * Length is {@code rowsInPage + 1}; null for single-valued columns.
+     */
+    public int[] listOffsets;
+
+    /**
+     * Off-heap view of the packed presence bitset: bit {@code presenceBitOffset + i} set when
+     * row {@code firstRow + i} is non-null. One {@code long} word per 64 rows. {@code null}
+     * means every row is present (borrowed Arrow arrays without a validity bitmap).
      */
     public MemorySegment presenceBits;
+
+    /** First presence bit of this page within {@link #presenceBits} (borrowed Arrow bitmaps are bit-sliced). */
+    public int presenceBitOffset;
 
     /** Number of rows in the cached page. */
     public int rowCount() {
@@ -62,14 +91,26 @@ public final class PageCache {
      * Constant-time presence test for a global row that lies within {@code [firstRow, lastRow]}.
      */
     public boolean isPresent(long row) {
-        int idx = (int) (row - firstRow);
-        long word = presenceBits.getAtIndex(ValueLayout.JAVA_LONG, idx >> 6);
+        if (presenceBits == null) {
+            return true;
+        }
+        long idx = row - firstRow + presenceBitOffset;
+        long word = presenceBits.getAtIndex(ValueLayout.JAVA_LONG, idx >>> 6);
         return (word & (1L << (idx & 63))) != 0L;
     }
 
     /** Returns the raw {@code long} bits for a primitive value at the given global row. */
     public long valueAt(long row) {
-        return values.getAtIndex(ValueLayout.JAVA_LONG, row - firstRow);
+        long idx = row - firstRow;
+        return switch (valueKind) {
+            case KIND_LONG -> values.getAtIndex(ValueLayout.JAVA_LONG, idx);
+            case KIND_INT -> values.getAtIndex(ValueLayout.JAVA_INT, idx);
+            case KIND_UINT_BITS -> Integer.toUnsignedLong(values.getAtIndex(ValueLayout.JAVA_INT, idx));
+            case KIND_SHORT -> values.getAtIndex(ValueLayout.JAVA_SHORT, idx);
+            case KIND_USHORT -> Short.toUnsignedLong(values.getAtIndex(ValueLayout.JAVA_SHORT, idx));
+            case KIND_BYTE -> values.get(ValueLayout.JAVA_BYTE, idx);
+            default -> Byte.toUnsignedLong(values.get(ValueLayout.JAVA_BYTE, idx));
+        };
     }
 
     /** True when the given global row falls within this cached page's range. */

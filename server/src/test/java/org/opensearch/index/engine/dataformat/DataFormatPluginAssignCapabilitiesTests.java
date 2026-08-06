@@ -13,6 +13,7 @@ import org.opensearch.index.engine.dataformat.stub.MockDataFormatPlugin;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MapperParsingException;
 import org.opensearch.index.mapper.NumberFieldMapper;
+import org.opensearch.index.mapper.TextFieldMapper;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.Map;
@@ -43,6 +44,42 @@ public class DataFormatPluginAssignCapabilitiesTests extends OpenSearchTestCase 
             Set.of(FieldTypeCapabilities.Capability.FULL_TEXT_SEARCH, FieldTypeCapabilities.Capability.COLUMNAR_STORAGE),
             capMap.get(format)
         );
+    }
+
+    public void testOptionalColumnarCapabilityIsAssignedWhenSupported() {
+        MockDataFormat format = new MockDataFormat(
+            "text-format",
+            100L,
+            Set.of(
+                new FieldTypeCapabilities(
+                    "text",
+                    Set.of(FieldTypeCapabilities.Capability.FULL_TEXT_SEARCH, FieldTypeCapabilities.Capability.COLUMNAR_STORAGE)
+                )
+            )
+        );
+        DataFormatPlugin plugin = MockDataFormatPlugin.of(format);
+        TextFieldMapper.TextFieldType fieldType = new TextFieldMapper.TextFieldType("test_field");
+
+        plugin.assignCapabilities(fieldType, null, null);
+
+        assertEquals(
+            Set.of(FieldTypeCapabilities.Capability.FULL_TEXT_SEARCH, FieldTypeCapabilities.Capability.COLUMNAR_STORAGE),
+            fieldType.getCapabilityMap().get(format)
+        );
+    }
+
+    public void testUnsupportedOptionalCapabilityDoesNotFailMapping() {
+        MockDataFormat format = new MockDataFormat(
+            "text-format",
+            100L,
+            Set.of(new FieldTypeCapabilities("text", Set.of(FieldTypeCapabilities.Capability.FULL_TEXT_SEARCH)))
+        );
+        DataFormatPlugin plugin = MockDataFormatPlugin.of(format);
+        TextFieldMapper.TextFieldType fieldType = new TextFieldMapper.TextFieldType("test_field");
+
+        plugin.assignCapabilities(fieldType, null, null);
+
+        assertEquals(Set.of(FieldTypeCapabilities.Capability.FULL_TEXT_SEARCH), fieldType.getCapabilityMap().get(format));
     }
 
     public void testSingleFormatPartialCoverage_Throws() {

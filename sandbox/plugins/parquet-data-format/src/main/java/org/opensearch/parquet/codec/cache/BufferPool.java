@@ -15,7 +15,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Layer 5 — hot-buffer pooling. Owns a confined {@link Arena} and hands out reusable,
+ * Layer 5 — hot-buffer pooling. Owns a shared {@link Arena} and hands out reusable,
  * grow-on-demand native scratch segments for the FFM out-buffers that the column reader
  * passes to the native page-decode / value-read functions.
  *
@@ -27,9 +27,9 @@ import java.util.Map;
  * size that still fits the slot's current backing segment returns that same segment (sliced
  * to the requested length); a larger request replaces the backing segment.
  *
- * <p>Because doc IDs arrive ascending and a producer is single-threaded (one segment per
- * query thread), a pool shared across a producer's column readers needs no synchronization.
- * {@link #close()} frees every slot at once (the "release" step).
+ * <p>Lucene may prepare a query and collect its leaves on different worker threads. The arena
+ * and slot map must therefore permit thread migration even though each individual DocValues
+ * iterator remains forward-only. {@link #close()} frees every slot at once (the "release" step).
  *
  * <p>Callers must re-fetch (not cache across calls) a slot's segment, since a growth event
  * replaces it. Returned segments are owned by the pool and must not be freed by callers.
@@ -42,7 +42,7 @@ public final class BufferPool implements AutoCloseable {
         long capacity;
     }
 
-    private final Arena arena = Arena.ofConfined();
+    private final Arena arena = Arena.ofShared();
     private final Map<String, Slot> slots = new HashMap<>();
     private boolean closed;
 
@@ -51,7 +51,7 @@ public final class BufferPool implements AutoCloseable {
      * bytes (minimum 1). The returned segment may be larger than requested; callers slice it
      * to the exact length they need.
      */
-    public MemorySegment bytes(String slot, long byteSize) {
+    public synchronized MemorySegment bytes(String slot, long byteSize) {
         ensureOpen();
         long needed = Math.max(byteSize, 1);
         Slot s = slots.computeIfAbsent(slot, k -> new Slot());
@@ -83,7 +83,7 @@ public final class BufferPool implements AutoCloseable {
     }
 
     /** Number of distinct slots currently backed by a segment (for tests / diagnostics). */
-    public int slotCount() {
+    public synchronized int slotCount() {
         return slots.size();
     }
 
@@ -99,7 +99,7 @@ public final class BufferPool implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         if (closed == false) {
             closed = true;
             slots.clear();

@@ -238,6 +238,48 @@ public final class ParquetSettings {
         Setting.Property.NodeScope
     );
 
+    public static final String DECODE_PATH_CODEC_NATIVE = "codec_native";
+    public static final String DECODE_PATH_DATAFUSION = "datafusion";
+    public static final Set<String> VALID_DECODE_PATHS = Set.of(DECODE_PATH_CODEC_NATIVE, DECODE_PATH_DATAFUSION);
+
+    /**
+     * Selects the DocValues decoder. The DataFusion path retains one Arrow reader per accessed
+     * column and advances it by row using page-level OffsetIndex skips.
+     */
+    public static final Setting<String> DOCVALUES_DECODE_PATH = new Setting<>(
+        "parquet.docvalues.decode_path",
+        DECODE_PATH_CODEC_NATIVE,
+        ParquetSettings::validateDecodePath,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /** Starting Arrow decode window for the adaptive DataFusion DocValues cursor. */
+    public static final Setting<Integer> DOCVALUES_INITIAL_BATCH_SIZE = Setting.intSetting(
+        "parquet.docvalues.initial_batch_size",
+        32,
+        1,
+        8192,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /** Emits DataFusion cursor diagnostics for DocValues decoder benchmarking. */
+    public static final Setting<Boolean> DOCVALUES_DIAGNOSTICS = Setting.boolSetting(
+        "parquet.docvalues.diagnostics",
+        false,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    private static String validateDecodePath(String value) {
+        String normalized = value.toLowerCase(Locale.ROOT);
+        if (VALID_DECODE_PATHS.contains(normalized) == false) {
+            throw new IllegalArgumentException("Invalid parquet.docvalues.decode_path: " + value + ". Valid values: " + VALID_DECODE_PATHS);
+        }
+        return normalized;
+    }
+
     /**
      * Minimum number of variable-width (string/binary) non-sort columns required to activate
      * deferred data loading during merge. Below this threshold, all columns are decoded eagerly
@@ -872,6 +914,9 @@ public final class ParquetSettings {
             MERGE_IO_THREADS,
             LIQUID_CACHE_ENABLED,
             LIQUID_CACHE_MAX_BYTES,
+            DOCVALUES_DECODE_PATH,
+            DOCVALUES_INITIAL_BATCH_SIZE,
+            DOCVALUES_DIAGNOSTICS,
             MERGE_DEFERRED_COLUMN_THRESHOLD,
             WRITE_POOL_MIN,
             WRITE_POOL_MAX,

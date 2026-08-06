@@ -11,6 +11,8 @@ package org.opensearch.parquet.codec.cache;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Unit tests for {@link BufferPool} (task 3.4): per-role reuse, monotonic grow, distinct
@@ -69,5 +71,28 @@ public class BufferPoolTests extends OpenSearchTestCase {
         expectThrows(IllegalStateException.class, () -> pool.bytes("scratch", 16));
         // close is idempotent
         pool.close();
+    }
+
+    public void testSegmentsCanMoveAcrossThreads() throws Exception {
+        try (BufferPool pool = new BufferPool()) {
+            MemorySegment segment = pool.longOut("value");
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread worker = new Thread(() -> {
+                try {
+                    segment.set(ValueLayout.JAVA_LONG, 0, 42L);
+                    assertSame(segment, pool.longOut("value"));
+                } catch (Throwable t) {
+                    failure.set(t);
+                }
+            });
+
+            worker.start();
+            worker.join();
+
+            if (failure.get() != null) {
+                throw new AssertionError("cross-thread pool access failed", failure.get());
+            }
+            assertEquals(42L, segment.get(ValueLayout.JAVA_LONG, 0));
+        }
     }
 }

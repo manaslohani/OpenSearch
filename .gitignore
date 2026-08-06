@@ -75,3 +75,9 @@ doc-tools/missing-doclet/bin/
 
 /sandbox/plugins/analytics-backend-datafusion/target/
 /sandbox/libs/dataformat-native/rust/target
+/distro/3.8.0-ARCHIVE/
+/cb-results
+/docs-benchmark
+/docs-codex-ai
+/docs-nested
+/cb-results-ec2

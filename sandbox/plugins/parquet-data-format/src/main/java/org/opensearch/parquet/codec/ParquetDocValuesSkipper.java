@@ -48,13 +48,17 @@ public final class ParquetDocValuesSkipper extends DocValuesSkipper {
         long min = Long.MAX_VALUE;
         long max = Long.MIN_VALUE;
         long withValue = 0;
+        boolean hasComparableValue = false;
         for (int p = 0; p < pageIndex.pageCount(); p++) {
-            min = Math.min(min, pageIndex.minOf(p));
-            max = Math.max(max, pageIndex.maxOf(p));
+            if (pageIndex.isAllNulls(p) == false) {
+                min = Math.min(min, pageIndex.minOf(p));
+                max = Math.max(max, pageIndex.maxOf(p));
+                hasComparableValue = true;
+            }
             withValue += pageDocCount(pageIndex, p);
         }
-        this.globalMin = pageIndex.pageCount() == 0 ? Long.MIN_VALUE : min;
-        this.globalMax = pageIndex.pageCount() == 0 ? Long.MAX_VALUE : max;
+        this.globalMin = hasComparableValue ? min : Long.MIN_VALUE;
+        this.globalMax = hasComparableValue ? max : Long.MAX_VALUE;
         this.globalDocCount = (int) withValue;
     }
 

@@ -9,7 +9,7 @@
 package org.opensearch.parquet.codec.iter;
 
 import org.apache.lucene.index.NumericDocValues;
-import org.opensearch.parquet.bridge.ParquetColumnReader;
+import org.opensearch.parquet.bridge.NumericPageReader;
 import org.opensearch.parquet.codec.cache.PageCache;
 
 import java.io.IOException;
@@ -18,21 +18,21 @@ import java.io.IOException;
  * Cache-aware {@link NumericDocValues} over a single-valued Parquet primitive column.
  *
  * <p>Hot path: a presence bit-test plus a {@code long[]} index lookup against the column
- * reader's current {@link PageCache}. Cold path (page miss): {@link ParquetColumnReader#loadPageContaining}
+ * reader's current {@link PageCache}. Cold path (page miss): {@link NumericPageReader#loadPageContaining}
  * decodes the page (or applies the Layer 4 all-nulls skip). Float/double values are stored as
  * raw IEEE-754 bits at page-decode time, so {@link #longValue()} returns the Lucene-encoded
  * form directly.
  */
 public final class ParquetNumericDocValues extends NumericDocValues {
 
-    private final ParquetColumnReader reader;
+    private final NumericPageReader reader;
     private final int maxDoc;
 
     private int doc = -1;
     private long currentValue;
     private boolean currentPresent;
 
-    public ParquetNumericDocValues(ParquetColumnReader reader, int maxDoc) {
+    public ParquetNumericDocValues(NumericPageReader reader, int maxDoc) {
         this.reader = reader;
         this.maxDoc = maxDoc;
     }
