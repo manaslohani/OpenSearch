@@ -22,7 +22,6 @@ import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
-import org.opensearch.parquet.bridge.BinaryPageReader;
 import org.opensearch.parquet.bridge.DataFusionColumnReader;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
 import org.opensearch.parquet.bridge.RustBridge;
@@ -196,28 +195,32 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     public NumericDocValues getNumeric(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.NUMERIC);
-        return new ParquetNumericDocValues(dataFusionReaderFor(field, false), maxDoc);
+        // Dedicated (non-shared) reader: under concurrent segment search a single producer serves
+        // every slice, and a shared forward-only cursor would be driven backwards by one slice
+        // while another advances it (df_docvalues "backward seek" error, and racing scratch
+        // buffers). Each iterator gets its own cursor instead. See dedicatedReaderFor.
+        return new ParquetNumericDocValues(dedicatedReaderFor(field, false), maxDoc);
     }
 
     @Override
     public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.SORTED_NUMERIC);
-        return new ParquetSortedNumericDocValues(dataFusionReaderFor(field, true), maxDoc);
+        return new ParquetSortedNumericDocValues(dedicatedReaderFor(field, true), maxDoc);
     }
 
     @Override
     public BinaryDocValues getBinary(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.BINARY);
-        return new ParquetBinaryDocValues(dataFusionReaderFor(field, false), maxDoc);
+        return new ParquetBinaryDocValues(dedicatedReaderFor(field, false), maxDoc);
     }
 
     @Override
     public SortedDocValues getSorted(FieldInfo field) throws IOException {
         ensureOpen();
         validate(field, DocValuesType.SORTED);
-        return new ParquetSortedDocValues(binaryReaderFor(field, false), maxDoc);
+        return new ParquetSortedDocValues(dedicatedReaderFor(field, false), maxDoc);
     }
 
     @Override
@@ -227,7 +230,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         // Convention (mirrors the ordinal-table era and the leaf reader's routing): SORTED_SET
         // reaches this producer only for genuinely repeated columns; single-valued keywords are
         // served through getSorted and wrapped with DocValues.singleton by the leaf reader.
-        return new ParquetSortedSetDocValues(binaryReaderFor(field, true), true, maxDoc);
+        return new ParquetSortedSetDocValues(dedicatedReaderFor(field, true), true, maxDoc);
     }
 
     /**
@@ -371,9 +374,18 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         return nonNull;
     }
 
-    private synchronized BinaryPageReader binaryReaderFor(FieldInfo field, boolean repeated) throws IOException {
-        // Sorted iterators need instance-scoped cursors (shared producers are accessed
-        // concurrently), so each gets a dedicated reader with instance-unique pool slots.
+    /**
+     * A dedicated (non-shared) column reader for one streaming iterator. Every value-reading
+     * accessor (numeric, binary, sorted, sorted-set) routes here: under concurrent segment search
+     * a single producer serves all slices, and a shared {@link DataFusionColumnReader} owns one
+     * forward-only native cursor plus one family of scratch buffers. Two slices scanning disjoint
+     * ascending doc ranges would then drive the cursor against each other -- one advances it while
+     * another seeks back to row 0 -- surfacing as "df_docvalues: backward seek ... is not
+     * supported" (and, more subtly, corrupting each other's decode buffers). Instance-scoped
+     * cursors with instance-unique {@link BufferPool} slots keep each slice's scan sequential and
+     * independent. Readers are registered for close with the producer (segment lifetime).
+     */
+    private synchronized DataFusionColumnReader dedicatedReaderFor(FieldInfo field, boolean repeated) throws IOException {
         DataFusionColumnReader reader = DataFusionColumnReader.open(
             parquetFile,
             field.getName(),
@@ -386,6 +398,12 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         return reader;
     }
 
+    /**
+     * The shared, cached reader for a field. Reserved for read-only metadata access
+     * ({@link DataFusionColumnReader#pageIndex()} in {@link #getSkipper} and
+     * {@link #nonNullRowCount}), which never moves the native cursor and so is safe to share
+     * across concurrent slices. Value iteration must use {@link #dedicatedReaderFor} instead.
+     */
     private synchronized DataFusionColumnReader dataFusionReaderFor(FieldInfo field, boolean repeated) throws IOException {
         DataFusionColumnReader reader = dataFusionColumnReaders.get(field.getName());
         if (reader == null) {
