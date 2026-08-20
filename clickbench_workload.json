@@ -1,0 +1,1751 @@
+[
+  {
+    "name": "dsl-q01-count-all",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "track_total_hits": true
+    }
+  },
+  {
+    "name": "dsl-q02-count-adv-engine",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "exists": {
+                "field": "AdvEngineID"
+              }
+            }
+          ],
+          "must_not": [
+            {
+              "term": {
+                "AdvEngineID": 0
+              }
+            }
+          ]
+        }
+      },
+      "track_total_hits": true
+    }
+  },
+  {
+    "name": "dsl-q03-sum-count-avg",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "sum(AdvEngineID)": {
+          "sum": {
+            "field": "AdvEngineID"
+          }
+        },
+        "avg(ResolutionWidth)": {
+          "avg": {
+            "field": "ResolutionWidth"
+          }
+        }
+      },
+      "track_total_hits": true
+    }
+  },
+  {
+    "name": "dsl-q04-avg-userid",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "avg(UserID)": {
+          "avg": {
+            "field": "UserID"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q05-distinct-userid",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "dc(UserID)": {
+          "cardinality": {
+            "field": "UserID"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q06-distinct-searchphrase",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "dc(SearchPhrase)": {
+          "cardinality": {
+            "field": "SearchPhrase"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q07-min-max-eventdate",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "min(EventDate)": {
+          "min": {
+            "field": "EventDate"
+          }
+        },
+        "max(EventDate)": {
+          "max": {
+            "field": "EventDate"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q08-group-by-adv-engine",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "AdvEngineID": {
+          "terms": {
+            "field": "AdvEngineID",
+            "size": 10000,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "exclude": [
+              0
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q09-region-users",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "RegionID": {
+          "terms": {
+            "field": "RegionID",
+            "size": 10,
+            "order": [
+              {
+                "u": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          },
+          "aggs": {
+            "u": {
+              "cardinality": {
+                "field": "UserID"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q10-region-stats",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "RegionID": {
+          "terms": {
+            "field": "RegionID",
+            "size": 10,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          },
+          "aggs": {
+            "sum(AdvEngineID)": {
+              "sum": {
+                "field": "AdvEngineID"
+              }
+            },
+            "avg(ResolutionWidth)": {
+              "avg": {
+                "field": "ResolutionWidth"
+              }
+            },
+            "dc(UserID)": {
+              "cardinality": {
+                "field": "UserID"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q11-mobile-phone-model",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "MobilePhoneModel": {
+          "terms": {
+            "field": "MobilePhoneModel",
+            "size": 10,
+            "shard_size": 10000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "u": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "exclude": [
+              ""
+            ]
+          },
+          "aggs": {
+            "u": {
+              "cardinality": {
+                "field": "UserID"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q12-mobile-phone-stats",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "exists": {
+                "field": "MobilePhoneModel"
+              }
+            }
+          ],
+          "must_not": [
+            {
+              "term": {
+                "MobilePhoneModel": ""
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "MobilePhone|MobilePhoneModel": {
+          "multi_terms": {
+            "terms": [
+              {
+                "field": "MobilePhone"
+              },
+              {
+                "field": "MobilePhoneModel"
+              }
+            ],
+            "size": 10,
+            "shard_size": 10000,
+            "order": [
+              {
+                "u": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          },
+          "aggs": {
+            "u": {
+              "cardinality": {
+                "field": "UserID"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q13-search-phrase-count",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "SearchPhrase": {
+          "terms": {
+            "field": "SearchPhrase",
+            "size": 10,
+            "shard_size": 10000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "exclude": [
+              ""
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q14-search-phrase-users",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "SearchPhrase": {
+          "terms": {
+            "field": "SearchPhrase",
+            "size": 10,
+            "shard_size": 10000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "u": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "exclude": [
+              ""
+            ]
+          },
+          "aggs": {
+            "u": {
+              "cardinality": {
+                "field": "UserID"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q15-search-engine-phrase",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "script": {
+          "script": {
+            "source": "doc['SearchPhrase'].size() != 0 && doc['SearchPhrase'].value.length() != 0"
+          }
+        }
+      },
+      "aggs": {
+        "SearchEngineID|SearchPhrase": {
+          "multi_terms": {
+            "terms": [
+              {
+                "field": "SearchEngineID"
+              },
+              {
+                "field": "SearchPhrase"
+              }
+            ],
+            "size": 10,
+            "shard_size": 10000,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q16-user-activity",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "UserID": {
+          "terms": {
+            "field": "UserID",
+            "size": 10,
+            "shard_size": 10000,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q17-user-search-activity",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "UserID|SearchPhrase": {
+          "multi_terms": {
+            "terms": [
+              {
+                "field": "UserID"
+              },
+              {
+                "field": "SearchPhrase"
+              }
+            ],
+            "size": 10,
+            "shard_size": 10000,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q18-user-search-limit",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "UserID|SearchPhrase": {
+          "multi_terms": {
+            "size": 10,
+            "terms": [
+              {
+                "field": "UserID"
+              },
+              {
+                "field": "SearchPhrase"
+              }
+            ],
+            "order": [
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q19-user-minute-search",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "UserID|m|SearchPhrase": {
+          "multi_terms": {
+            "terms": [
+              {
+                "field": "UserID"
+              },
+              {
+                "script": {
+                  "source": "doc['EventTime'].value.getMinute()"
+                },
+                "value_type": "long"
+              },
+              {
+                "field": "SearchPhrase"
+              }
+            ],
+            "size": 10,
+            "shard_size": 10000,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q20-specific-user",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 10000,
+      "_source": false,
+      "query": {
+        "term": {
+          "UserID": 435090932899640449
+        }
+      },
+      "stored_fields": "_none_",
+      "docvalue_fields": [
+        "UserID"
+      ]
+    }
+  },
+  {
+    "name": "dsl-q21-google-urls",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "wildcard": {
+          "URL": {
+            "value": "*google*"
+          }
+        }
+      },
+      "track_total_hits": true
+    }
+  },
+  {
+    "name": "dsl-q22-google-search-phrases",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "wildcard": {
+                "URL": {
+                  "value": "*google*"
+                }
+              }
+            },
+            {
+              "exists": {
+                "field": "SearchPhrase"
+              }
+            }
+          ],
+          "must_not": [
+            {
+              "term": {
+                "SearchPhrase": ""
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "SearchPhrase": {
+          "terms": {
+            "field": "SearchPhrase",
+            "size": 10,
+            "shard_size": 10000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "exclude": [
+              ""
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q23-google-title-search",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "wildcard": {
+                "Title": {
+                  "value": "*google*"
+                }
+              }
+            }
+          ],
+          "must_not": [
+            {
+              "wildcard": {
+                "URL": {
+                  "value": "*.google.*"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "SearchPhrase": {
+          "terms": {
+            "field": "SearchPhrase",
+            "size": 10,
+            "shard_size": 10000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "exclude": [
+              ""
+            ]
+          },
+          "aggs": {
+            "dc(UserID)": {
+              "cardinality": {
+                "field": "UserID"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q24-google-urls-sorted",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 10,
+      "query": {
+        "wildcard": {
+          "URL": {
+            "value": "*google*"
+          }
+        }
+      },
+      "sort": [
+        {
+          "EventTime": "asc"
+        },
+        {
+          "_doc": "asc"
+        }
+      ]
+    }
+  },
+  {
+    "name": "dsl-q25-search-phrases-by-time",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 10,
+      "_source": false,
+      "query": {
+        "script": {
+          "script": {
+            "source": "doc['SearchPhrase'].size() != 0 && doc['SearchPhrase'].value.length() != 0"
+          }
+        }
+      },
+      "stored_fields": "_none_",
+      "docvalue_fields": [
+        "SearchPhrase"
+      ],
+      "sort": [
+        {
+          "EventTime": "asc"
+        },
+        {
+          "_doc": "asc"
+        }
+      ]
+    }
+  },
+  {
+    "name": "dsl-q26-search-phrases-sorted",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 10,
+      "_source": false,
+      "query": {
+        "script": {
+          "script": {
+            "source": "doc['SearchPhrase'].size() != 0 && doc['SearchPhrase'].value.length() != 0"
+          }
+        }
+      },
+      "stored_fields": "_none_",
+      "docvalue_fields": [
+        "SearchPhrase"
+      ],
+      "sort": [
+        {
+          "SearchPhrase": "asc"
+        },
+        {
+          "_doc": "asc"
+        }
+      ]
+    }
+  },
+  {
+    "name": "dsl-q27-search-phrases-multi-sort",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 10,
+      "_source": false,
+      "query": {
+        "script": {
+          "script": {
+            "source": "doc['SearchPhrase'].size() != 0 && doc['SearchPhrase'].value.length() != 0"
+          }
+        }
+      },
+      "stored_fields": "_none_",
+      "docvalue_fields": [
+        "SearchPhrase"
+      ],
+      "sort": [
+        {
+          "EventTime": "asc"
+        },
+        {
+          "SearchPhrase": "asc"
+        },
+        {
+          "_doc": "asc"
+        }
+      ]
+    }
+  },
+  {
+    "name": "dsl-q28-counter-url-length",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "script": {
+          "script": {
+            "source": "doc['URL'].size() != 0 && doc['URL'].value.length() != 0"
+          }
+        }
+      },
+      "aggs": {
+        "CounterID": {
+          "terms": {
+            "field": "CounterID",
+            "size": 25,
+            "shard_size": 10000,
+            "order": [
+              {
+                "l": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "min_doc_count": 100001
+          },
+          "aggs": {
+            "l": {
+              "avg": {
+                "script": {
+                  "source": "doc['URL'].value.length()"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q29-referer-analysis",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "script": {
+          "script": {
+            "source": "doc['Referer'].size() != 0 && doc['Referer'].value.length() != 0"
+          }
+        }
+      },
+      "aggs": {
+        "k": {
+          "terms": {
+            "script": {
+              "source": "String v = doc['Referer'].value; int start = v.startsWith('https://') ? 8 : (v.startsWith('http://') ? 7 : -1); if (start < 0) return v; if (v.startsWith('www.', start)) start += 4; int slash = v.indexOf('/', start); return slash < 0 ? v : v.substring(start, slash);"
+            },
+            "size": 25,
+            "shard_size": 10000,
+            "order": [
+              {
+                "l": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "min_doc_count": 100001
+          },
+          "aggs": {
+            "l": {
+              "avg": {
+                "script": {
+                  "source": "doc['Referer'].value.length()"
+                }
+              }
+            },
+            "min(Referer)": {
+              "top_hits": {
+                "size": 1,
+                "_source": false,
+                "docvalue_fields": [
+                  "Referer"
+                ],
+                "sort": [
+                  {
+                    "Referer": "asc"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q30-resolution-width-sums",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "sum(ResolutionWidth)": {
+          "sum": {
+            "field": "ResolutionWidth"
+          }
+        },
+        "sum(ResolutionWidth+1)": {
+          "sum": {
+            "script": {
+              "source": "doc['ResolutionWidth'].value + 1"
+            }
+          }
+        },
+        "sum(ResolutionWidth+2)": {
+          "sum": {
+            "script": {
+              "source": "doc['ResolutionWidth'].value + 2"
+            }
+          }
+        },
+        "sum(ResolutionWidth+3)": {
+          "sum": {
+            "script": {
+              "source": "doc['ResolutionWidth'].value + 3"
+            }
+          }
+        },
+        "sum(ResolutionWidth+4)": {
+          "sum": {
+            "script": {
+              "source": "doc['ResolutionWidth'].value + 4"
+            }
+          }
+        },
+        "sum(ResolutionWidth+5)": {
+          "sum": {
+            "script": {
+              "source": "doc['ResolutionWidth'].value + 5"
+            }
+          }
+        },
+        "sum(ResolutionWidth+6)": {
+          "sum": {
+            "script": {
+              "source": "doc['ResolutionWidth'].value + 6"
+            }
+          }
+        },
+        "sum(ResolutionWidth+7)": {
+          "sum": {
+            "script": {
+              "source": "doc['ResolutionWidth'].value + 7"
+            }
+          }
+        },
+        "sum(ResolutionWidth+8)": {
+          "sum": {
+            "script": {
+              "source": "doc['ResolutionWidth'].value + 8"
+            }
+          }
+        },
+        "sum(ResolutionWidth+9)": {
+          "sum": {
+            "script": {
+              "source": "doc['ResolutionWidth'].value + 9"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q31-search-engine-client-stats",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "script": {
+          "script": {
+            "source": "doc['SearchPhrase'].size() != 0 && doc['SearchPhrase'].value.length() != 0"
+          }
+        }
+      },
+      "aggs": {
+        "SearchEngineID": {
+          "terms": {
+            "field": "SearchEngineID",
+            "size": 100,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          },
+          "aggs": {
+            "ClientIP": {
+              "terms": {
+                "field": "ClientIP",
+                "size": 10,
+                "shard_size": 10000,
+                "order": [
+                  {
+                    "_count": "desc"
+                  },
+                  {
+                    "_key": "asc"
+                  }
+                ]
+              },
+              "aggs": {
+                "sum(IsRefresh)": {
+                  "sum": {
+                    "field": "IsRefresh"
+                  }
+                },
+                "avg(ResolutionWidth)": {
+                  "avg": {
+                    "field": "ResolutionWidth"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q32-watch-client-stats",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "script": {
+          "script": {
+            "source": "doc['SearchPhrase'].size() != 0 && doc['SearchPhrase'].value.length() != 0"
+          }
+        }
+      },
+      "aggs": {
+        "WatchID": {
+          "terms": {
+            "field": "WatchID",
+            "size": 100,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          },
+          "aggs": {
+            "ClientIP": {
+              "terms": {
+                "field": "ClientIP",
+                "size": 10,
+                "order": [
+                  {
+                    "_count": "desc"
+                  },
+                  {
+                    "_key": "asc"
+                  }
+                ]
+              },
+              "aggs": {
+                "sum(IsRefresh)": {
+                  "sum": {
+                    "field": "IsRefresh"
+                  }
+                },
+                "avg(ResolutionWidth)": {
+                  "avg": {
+                    "field": "ResolutionWidth"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q33-watch-client-all",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "WatchID": {
+          "terms": {
+            "field": "WatchID",
+            "size": 100,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          },
+          "aggs": {
+            "ClientIP": {
+              "terms": {
+                "field": "ClientIP",
+                "size": 10,
+                "order": [
+                  {
+                    "_count": "desc"
+                  },
+                  {
+                    "_key": "asc"
+                  }
+                ]
+              },
+              "aggs": {
+                "sum(IsRefresh)": {
+                  "sum": {
+                    "field": "IsRefresh"
+                  }
+                },
+                "avg(ResolutionWidth)": {
+                  "avg": {
+                    "field": "ResolutionWidth"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q34-url-popularity",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "URL": {
+          "terms": {
+            "field": "URL",
+            "size": 10,
+            "shard_size": 10000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q35-url-with-constant",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "URL": {
+          "terms": {
+            "field": "URL",
+            "size": 10,
+            "shard_size": 10000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q36-client-ip-variations",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "aggs": {
+        "ClientIP": {
+          "terms": {
+            "field": "ClientIP",
+            "size": 10,
+            "shard_size": 10000,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q37-counter-62-urls",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "term": {
+                "CounterID": 62
+              }
+            },
+            {
+              "range": {
+                "EventDate": {
+                  "gte": "2013-07-01",
+                  "lte": "2013-07-31"
+                }
+              }
+            },
+            {
+              "term": {
+                "IsRefresh": 0
+              }
+            },
+            {
+              "term": {
+                "DontCountHits": 0
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "URL": {
+          "terms": {
+            "field": "URL",
+            "size": 10,
+            "shard_size": 10000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "exclude": [
+              ""
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q38-counter-62-titles",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "term": {
+                "CounterID": 62
+              }
+            },
+            {
+              "range": {
+                "EventDate": {
+                  "gte": "2013-07-01",
+                  "lte": "2013-07-31"
+                }
+              }
+            },
+            {
+              "term": {
+                "IsRefresh": 0
+              }
+            },
+            {
+              "term": {
+                "DontCountHits": 0
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "Title": {
+          "terms": {
+            "field": "Title",
+            "size": 10,
+            "shard_size": 10000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ],
+            "exclude": [
+              ""
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q39-counter-62-links",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "term": {
+                "CounterID": 62
+              }
+            },
+            {
+              "range": {
+                "EventDate": {
+                  "gte": "2013-07-01",
+                  "lte": "2013-07-31"
+                }
+              }
+            },
+            {
+              "term": {
+                "IsRefresh": 0
+              }
+            },
+            {
+              "bool": {
+                "filter": [
+                  {
+                    "exists": {
+                      "field": "IsLink"
+                    }
+                  }
+                ],
+                "must_not": [
+                  {
+                    "term": {
+                      "IsLink": 0
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "term": {
+                "IsDownload": 0
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "URL": {
+          "terms": {
+            "field": "URL",
+            "size": 1010,
+            "shard_size": 50000,
+            "execution_hint": "map",
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q40-traffic-source-analysis",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "term": {
+                "CounterID": 62
+              }
+            },
+            {
+              "range": {
+                "EventDate": {
+                  "gte": "2013-07-01",
+                  "lte": "2013-07-31"
+                }
+              }
+            },
+            {
+              "term": {
+                "IsRefresh": 0
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "TraficSourceID|SearchEngineID|AdvEngineID|Src|Dst": {
+          "multi_terms": {
+            "terms": [
+              {
+                "field": "TraficSourceID"
+              },
+              {
+                "field": "SearchEngineID"
+              },
+              {
+                "field": "AdvEngineID"
+              },
+              {
+                "script": {
+                  "source": "long search = doc['SearchEngineID'].size() == 0 ? 0 : doc['SearchEngineID'].value; long adv = doc['AdvEngineID'].size() == 0 ? 0 : doc['AdvEngineID'].value; return search == 0 && adv == 0 && doc['Referer'].size() != 0 ? doc['Referer'].value : '';"
+                }
+              },
+              {
+                "field": "URL"
+              }
+            ],
+            "size": 1010,
+            "shard_size": 50000,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q41-url-hash-date",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "term": {
+                "CounterID": 62
+              }
+            },
+            {
+              "range": {
+                "EventDate": {
+                  "gte": "2013-07-01",
+                  "lte": "2013-07-31"
+                }
+              }
+            },
+            {
+              "term": {
+                "IsRefresh": 0
+              }
+            },
+            {
+              "terms": {
+                "TraficSourceID": [
+                  -1,
+                  6
+                ]
+              }
+            },
+            {
+              "term": {
+                "RefererHash": 3594120000172545465
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "URLHash|EventDate": {
+          "multi_terms": {
+            "terms": [
+              {
+                "field": "URLHash"
+              },
+              {
+                "field": "EventDate"
+              }
+            ],
+            "size": 110,
+            "shard_size": 10000,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q42-window-client-dimensions",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "term": {
+                "CounterID": 62
+              }
+            },
+            {
+              "range": {
+                "EventDate": {
+                  "gte": "2013-07-01",
+                  "lte": "2013-07-31"
+                }
+              }
+            },
+            {
+              "term": {
+                "IsRefresh": 0
+              }
+            },
+            {
+              "term": {
+                "DontCountHits": 0
+              }
+            },
+            {
+              "term": {
+                "URLHash": 2868770270353813622
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "WindowClientWidth|WindowClientHeight": {
+          "multi_terms": {
+            "terms": [
+              {
+                "field": "WindowClientWidth"
+              },
+              {
+                "field": "WindowClientHeight"
+              }
+            ],
+            "size": 10010,
+            "order": [
+              {
+                "_count": "desc"
+              },
+              {
+                "_key": "asc"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "dsl-q43-hourly-pageviews",
+    "operation-type": "raw-request",
+    "method": "POST",
+    "path": "/_search",
+    "body": {
+      "size": 0,
+      "_source": false,
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "term": {
+                "CounterID": 62
+              }
+            },
+            {
+              "range": {
+                "EventDate": {
+                  "gte": "2013-07-14",
+                  "lte": "2013-07-15"
+                }
+              }
+            },
+            {
+              "term": {
+                "IsRefresh": 0
+              }
+            },
+            {
+              "term": {
+                "DontCountHits": 0
+              }
+            }
+          ]
+        }
+      },
+      "aggs": {
+        "composite_buckets": {
+          "composite": {
+            "size": 1010,
+            "sources": [
+              {
+                "M": {
+                  "date_histogram": {
+                    "field": "EventTime",
+                    "fixed_interval": "1m",
+                    "order": "asc"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]
