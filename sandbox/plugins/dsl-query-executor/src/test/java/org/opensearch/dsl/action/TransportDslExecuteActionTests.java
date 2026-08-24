@@ -14,18 +14,24 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.schema.impl.AbstractTable;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.opensearch.Version;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.IndicesOptions;
 import org.opensearch.analytics.EngineContextProvider;
 import org.opensearch.analytics.QueryRequestContext;
+import org.opensearch.cluster.ClusterName;
 import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.index.IndexNotFoundException;
+import org.opensearch.indices.IndicesService;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
@@ -90,6 +96,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -116,6 +123,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -140,7 +148,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         addTable(schema, "my-alias");
 
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
+        ClusterState state = stateWithIndices(new Index("concrete-backing-index", "uuid-backing"));
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -156,6 +164,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -192,6 +201,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -222,6 +232,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
                 throw new AssertionError("converter should not be invoked");
             },
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -250,6 +261,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -284,6 +296,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -305,7 +318,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         addTable(schema, "existing-index,missing-index");
 
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
+        ClusterState state = stateWithIndices(new Index("existing-index", "uuid-exists"));
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -321,6 +334,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -390,6 +404,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -412,7 +427,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         addTable(schema, "single-filtered-alias");
 
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
+        ClusterState state = stateWithIndices(new Index("single-backing", "uuid-single"));
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -427,6 +442,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -459,6 +475,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -476,7 +493,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         addTable(schema, "plain-concrete");
 
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
+        ClusterState state = stateWithIndices(new Index("plain-concrete", "uuid-plain"));
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -491,6 +508,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -508,7 +526,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         addTable(schema, "filtered-*");
 
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
+        ClusterState state = stateWithIndices(new Index("wc-backing", "uuid-wc"));
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -521,6 +539,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -542,7 +561,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         addTable(schema, "ctx-test-index");
 
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
+        ClusterState state = stateWithIndices(new Index("ctx-test-index", "uuid-ctx"));
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -560,6 +579,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
                 l.onResponse(Collections.emptyList());
             },
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -587,7 +607,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         addTable(schema, "default-opts-index");
 
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
+        ClusterState state = stateWithIndices(new Index("default-opts-index", "uuid-default"));
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -606,6 +626,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
                 l.onResponse(Collections.emptyList());
             },
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -645,7 +666,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         addTable(customSchema, "custom-options-table");
 
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
+        ClusterState state = stateWithIndices(new Index("custom-options-table", "uuid-custom"));
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -670,6 +691,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             provider,
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -713,6 +735,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -759,6 +782,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -805,6 +829,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -851,6 +876,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -893,6 +919,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -935,6 +962,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -963,7 +991,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         addTable(schema, "al_open");
 
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
+        ClusterState state = stateWithIndices(new Index("mi_open_b", "uuid-b"));
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -982,6 +1010,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -1033,6 +1062,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             mockContextProvider(ctx),
             (plan, execCtx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
@@ -1073,9 +1103,33 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         return listener;
     }
 
+    /**
+     * Builds a real ClusterState whose metadata contains the given indices. Required by the
+     * request-scoped mapping pinning path, which reads {@code state.metadata().getIndexSafe(index)}
+     * whenever a request resolves to a single concrete index.
+     */
+    private static ClusterState stateWithIndices(Index... indices) {
+        Metadata.Builder metadata = Metadata.builder();
+        for (Index index : indices) {
+            metadata.put(
+                IndexMetadata.builder(index.getName())
+                    .settings(
+                        Settings.builder()
+                            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+                            .put(IndexMetadata.SETTING_INDEX_UUID, index.getUUID())
+                    )
+                    .numberOfShards(1)
+                    .numberOfReplicas(0)
+                    .build(),
+                false
+            );
+        }
+        return ClusterState.builder(new ClusterName("test")).metadata(metadata).build();
+    }
+
     private TransportDslExecuteAction createAction(Index... resolvedIndices) {
+        ClusterState state = stateWithIndices(resolvedIndices);
         ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
         when(clusterService.state()).thenReturn(state);
 
         IndexNameExpressionResolver resolver = mock(IndexNameExpressionResolver.class);
@@ -1090,6 +1144,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
             buildEngineContext(),
             (plan, ctx, l) -> l.onResponse(Collections.emptyList()),
             clusterService,
+            mock(IndicesService.class),
             resolver,
             mockThreadPool()
         );
