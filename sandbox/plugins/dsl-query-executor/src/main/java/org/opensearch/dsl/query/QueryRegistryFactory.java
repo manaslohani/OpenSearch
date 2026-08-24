@@ -8,6 +8,8 @@
 
 package org.opensearch.dsl.query;
 
+import org.opensearch.dsl.query.range.RangeQueryTranslator;
+
 /**
  * Creates a {@link QueryRegistry} populated with all supported query translators.
  */
@@ -22,6 +24,13 @@ public class QueryRegistryFactory {
         registry.register(new TermsQueryTranslator());
         registry.register(new MatchAllQueryTranslator());
         registry.register(new ExistsQueryTranslator());
+        registry.register(new RangeQueryTranslator());
+        registry.register(new PrefixQueryTranslator());
+        registry.register(new WildcardQueryTranslator());
+        registry.register(new FuzzyQueryTranslator());
+        registry.register(new IdsQueryTranslator());
+        registry.register(new RegexpQueryTranslator());
+        registry.register(new BoolQueryTranslator(registry));
         // TODO: add other query translators
         return registry;
     }

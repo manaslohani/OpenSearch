@@ -47,9 +47,7 @@ public class SearchActionFilterTests extends OpenSearchTestCase {
      * given setting value.
      */
     private SearchActionFilter newFilter(boolean interceptEnabled) {
-        Settings settings = Settings.builder()
-            .put(SearchActionFilter.INTERCEPT_SEARCH_ENABLED.getKey(), interceptEnabled)
-            .build();
+        Settings settings = Settings.builder().put(SearchActionFilter.INTERCEPT_SEARCH_ENABLED.getKey(), interceptEnabled).build();
         ClusterSettings clusterSettings = new ClusterSettings(settings, Set.of(SearchActionFilter.INTERCEPT_SEARCH_ENABLED));
         ClusterService clusterService = mock(ClusterService.class);
         when(clusterService.getSettings()).thenReturn(settings);

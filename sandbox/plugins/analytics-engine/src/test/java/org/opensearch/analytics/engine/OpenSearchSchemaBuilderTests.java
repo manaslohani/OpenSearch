@@ -21,11 +21,14 @@ import org.apache.calcite.tools.FrameworkConfig;
 import org.apache.calcite.tools.Frameworks;
 import org.apache.calcite.tools.Planner;
 import org.opensearch.Version;
+import org.opensearch.action.support.IndicesOptions;
 import org.opensearch.analytics.schema.BinaryType;
 import org.opensearch.analytics.schema.DateOnlyType;
 import org.opensearch.analytics.schema.IpType;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
+import org.opensearch.analytics.schema.ScaledFloatType;
 import org.opensearch.analytics.schema.TimeOnlyType;
+import org.opensearch.analytics.schema.UnsignedLongType;
 import org.opensearch.cluster.ClusterName;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.AliasMetadata;
@@ -555,6 +558,114 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertNotEquals(a, c);
     }
 
+    // --- scaled_float tests ---
+
+    /** scaled_float with valid factor produces a ScaledFloatType marker (BIGINT-backed). */
+    public void testScaledFloatFieldWithFactorProducesScaledFloatType() throws Exception {
+        String mapping = "{\"properties\":{\"price\":{\"type\":\"scaled_float\",\"scaling_factor\":10}}}";
+        ClusterState clusterState = buildClusterStateRaw("sf_idx", mapping);
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("sf_idx");
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        RelDataTypeField field = rowType.getField("price", true, false);
+        assertNotNull(field);
+        assertTrue("Expected ScaledFloatType marker, got " + field.getType().getClass(), field.getType() instanceof ScaledFloatType);
+        assertEquals(SqlTypeName.BIGINT, field.getType().getSqlTypeName());
+        assertEquals(10.0, ((ScaledFloatType) field.getType()).getScalingFactor(), 0.0);
+    }
+
+    /** Factor-10 and factor-100 ScaledFloatType instances are digest-distinct (canonicalization trap). */
+    public void testScaledFloatDigestDistinctness() throws Exception {
+        String mapping = "{\"properties\":{"
+            + "\"price10\":{\"type\":\"scaled_float\",\"scaling_factor\":10},"
+            + "\"price100\":{\"type\":\"scaled_float\",\"scaling_factor\":100}"
+            + "}}";
+        ClusterState clusterState = buildClusterStateRaw("sf_digest_idx", mapping);
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("sf_digest_idx");
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        RelDataType type10 = rowType.getField("price10", true, false).getType();
+        RelDataType type100 = rowType.getField("price100", true, false).getType();
+        assertNotEquals("factor-10 and factor-100 must be distinct type objects", type10, type100);
+    }
+
+    /** Missing scaling_factor excludes the field from schema (does not throw). */
+    public void testScaledFloatMissingFactorExcludesField() throws Exception {
+        String mapping = "{\"properties\":{\"price\":{\"type\":\"scaled_float\"}}}";
+        ClusterState clusterState = buildClusterStateRaw("sf_no_factor_idx", mapping);
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("sf_no_factor_idx");
+        assertNotNull(table);
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertNull("Field without scaling_factor must be excluded", rowType.getField("price", true, false));
+    }
+
+    /** Zero scaling_factor excludes the field from schema. */
+    public void testScaledFloatZeroFactorExcludesField() throws Exception {
+        String mapping = "{\"properties\":{\"price\":{\"type\":\"scaled_float\",\"scaling_factor\":0}}}";
+        ClusterState clusterState = buildClusterStateRaw("sf_zero_idx", mapping);
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("sf_zero_idx");
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertNull("Field with zero scaling_factor must be excluded", rowType.getField("price", true, false));
+    }
+
+    /** Negative scaling_factor excludes the field from schema. */
+    public void testScaledFloatNegativeFactorExcludesField() throws Exception {
+        String mapping = "{\"properties\":{\"price\":{\"type\":\"scaled_float\",\"scaling_factor\":-5}}}";
+        ClusterState clusterState = buildClusterStateRaw("sf_neg_idx", mapping);
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("sf_neg_idx");
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertNull("Field with negative scaling_factor must be excluded", rowType.getField("price", true, false));
+    }
+
+    /** String-valued scaling_factor (e.g. "10") is accepted and parsed. */
+    public void testScaledFloatStringFactorAccepted() throws Exception {
+        String mapping = "{\"properties\":{\"price\":{\"type\":\"scaled_float\",\"scaling_factor\":\"10\"}}}";
+        ClusterState clusterState = buildClusterStateRaw("sf_str_idx", mapping);
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("sf_str_idx");
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        RelDataTypeField field = rowType.getField("price", true, false);
+        assertNotNull("String factor '10' must be accepted", field);
+        assertTrue(field.getType() instanceof ScaledFloatType);
+        assertEquals(10.0, ((ScaledFloatType) field.getType()).getScalingFactor(), 0.0);
+    }
+
+    // --- unsigned_long tests ---
+
+    /** unsigned_long field produces an UnsignedLongType marker (BIGINT-backed). */
+    public void testUnsignedLongFieldProducesUnsignedLongType() throws Exception {
+        ClusterState clusterState = buildClusterState(Map.of("ul_idx", Map.of("counter", "unsigned_long")));
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("ul_idx");
+        assertNotNull(table);
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        RelDataTypeField field = rowType.getField("counter", true, false);
+        assertNotNull(field);
+        assertTrue("Expected UnsignedLongType marker, got " + field.getType().getClass(), field.getType() instanceof UnsignedLongType);
+        assertEquals(SqlTypeName.BIGINT, field.getType().getSqlTypeName());
+    }
+
+    /** UnsignedLongType digest is UNSIGNED_LONG, distinct from plain BIGINT. */
+    public void testUnsignedLongDigestDistinctFromPlainBigint() throws Exception {
+        ClusterState clusterState = buildClusterState(
+            Map.of("mixed_long_idx", Map.of("signed_val", "long", "unsigned_val", "unsigned_long"))
+        );
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("mixed_long_idx");
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        RelDataType signedType = rowType.getField("signed_val", true, false).getType();
+        RelDataType unsignedType = rowType.getField("unsigned_val", true, false).getType();
+        // Both report BIGINT
+        assertEquals(SqlTypeName.BIGINT, signedType.getSqlTypeName());
+        assertEquals(SqlTypeName.BIGINT, unsignedType.getSqlTypeName());
+        // But they are distinguishable via instanceof
+        assertFalse("plain long must NOT be UnsignedLongType", signedType instanceof UnsignedLongType);
+        assertTrue("unsigned_long must be UnsignedLongType", unsignedType instanceof UnsignedLongType);
+    }
+
     // --- helpers ---
 
     private void assertFieldType(RelDataType rowType, String fieldName, SqlTypeName expectedType) {
@@ -746,5 +857,290 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
             }
         }
         return sb.toString();
+    }
+
+    // ===== D2: options-aware schema construction tests =====
+
+    /**
+     * Regression guard: an alias backed by two OPEN indices still yields a unioned row type
+     * containing fields from both backings when using the new 3-arg buildSchema overload
+     * with lenientExpandOpen (the default).
+     */
+    public void testAliasOverTwoOpenBackingsYieldsUnionedRowType() throws Exception {
+        IndexMetadata a = IndexMetadata.builder("idx_a")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"field_a\":{\"type\":\"keyword\"}}}")
+            .putAlias(AliasMetadata.builder("my_alias").build())
+            .build();
+        IndexMetadata b = IndexMetadata.builder("idx_b")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"field_b\":{\"type\":\"long\"}}}")
+            .putAlias(AliasMetadata.builder("my_alias").build())
+            .build();
+        ClusterState state = ClusterState.builder(new ClusterName("test"))
+            .metadata(Metadata.builder().put(a, false).put(b, false).build())
+            .build();
+
+        org.opensearch.cluster.metadata.IndexNameExpressionResolver resolver =
+            new org.opensearch.cluster.metadata.IndexNameExpressionResolver(
+                new org.opensearch.common.util.concurrent.ThreadContext(org.opensearch.common.settings.Settings.EMPTY)
+            );
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(state, resolver, IndicesOptions.lenientExpandOpen());
+
+        Table table = schema.getTable("my_alias");
+        assertNotNull("Alias over two OPEN backings must resolve", table);
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(rowType, "field_a", SqlTypeName.VARCHAR);
+        assertFieldType(rowType, "field_b", SqlTypeName.BIGINT);
+    }
+
+    /**
+     * Phantom-column fix: an alias backed by one OPEN and one CLOSED index yields ONLY the
+     * open backing's columns when resolved with lenientExpandOpen (wildcard states = OPEN only).
+     */
+    public void testAliasOverOpenAndClosedBackingExcludesClosedColumns() throws Exception {
+        IndexMetadata open = IndexMetadata.builder("idx_open")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"open_field\":{\"type\":\"keyword\"}}}")
+            .putAlias(AliasMetadata.builder("mixed_alias").build())
+            .state(IndexMetadata.State.OPEN)
+            .build();
+        IndexMetadata closed = IndexMetadata.builder("idx_closed")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"closed_field\":{\"type\":\"long\"}}}")
+            .putAlias(AliasMetadata.builder("mixed_alias").build())
+            .state(IndexMetadata.State.CLOSE)
+            .build();
+        ClusterState state = ClusterState.builder(new ClusterName("test"))
+            .metadata(Metadata.builder().put(open, false).put(closed, false).build())
+            .build();
+
+        org.opensearch.cluster.metadata.IndexNameExpressionResolver resolver =
+            new org.opensearch.cluster.metadata.IndexNameExpressionResolver(
+                new org.opensearch.common.util.concurrent.ThreadContext(org.opensearch.common.settings.Settings.EMPTY)
+            );
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(state, resolver, IndicesOptions.lenientExpandOpen());
+
+        Table table = schema.getTable("mixed_alias");
+        assertNotNull("Alias must still resolve when at least one backing is open", table);
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(rowType, "open_field", SqlTypeName.VARCHAR);
+        assertNull("Closed backing's column must NOT appear (phantom-column fix)", rowType.getField("closed_field", true, false));
+    }
+
+    /**
+     * Phantom-column invariant: even when IndicesOptions requests expandWildcardsClosed, the
+     * ALIAS short-circuit filters to State.OPEN unconditionally. A closed backing's fields must
+     * NOT appear in the row type because the planner (IndexResolution.resolveAlias) never
+     * targets closed indices — including them produces phantom columns that validate but
+     * null-fill at execution. The schema's column set must never exceed the union of mappings
+     * of the indices the planner will actually target.
+     */
+    public void testAliasWithExpandClosedOptionsStillExcludesClosedBacking() throws Exception {
+        IndexMetadata open = IndexMetadata.builder("idx_open")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"open_field\":{\"type\":\"keyword\"}}}")
+            .putAlias(AliasMetadata.builder("both_alias").build())
+            .state(IndexMetadata.State.OPEN)
+            .build();
+        IndexMetadata closed = IndexMetadata.builder("idx_closed")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"closed_field\":{\"type\":\"long\"}}}")
+            .putAlias(AliasMetadata.builder("both_alias").build())
+            .state(IndexMetadata.State.CLOSE)
+            .build();
+        ClusterState state = ClusterState.builder(new ClusterName("test"))
+            .metadata(Metadata.builder().put(open, false).put(closed, false).build())
+            .build();
+
+        // Options that expand both open AND closed
+        IndicesOptions expandBoth = IndicesOptions.fromOptions(
+            true,  // ignoreUnavailable
+            true,  // allowNoIndices
+            true,  // expandWildcardsOpen
+            true   // expandWildcardsClosed
+        );
+
+        org.opensearch.cluster.metadata.IndexNameExpressionResolver resolver =
+            new org.opensearch.cluster.metadata.IndexNameExpressionResolver(
+                new org.opensearch.common.util.concurrent.ThreadContext(org.opensearch.common.settings.Settings.EMPTY)
+            );
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(state, resolver, expandBoth);
+
+        Table table = schema.getTable("both_alias");
+        assertNotNull("Alias must resolve with expandBoth options", table);
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(rowType, "open_field", SqlTypeName.VARCHAR);
+        assertNull(
+            "Closed backing's column must NOT appear even with expandWildcardsClosed (phantom-column invariant)",
+            rowType.getField("closed_field", true, false)
+        );
+    }
+
+    /**
+     * Wildcard with strict options (no ALLOW_NO_INDICES, no IGNORE_UNAVAILABLE) vs lenient:
+     * strict options pass through to the resolver and may produce different results. Here we
+     * verify that the options parameter IS actually threaded to the resolver's concreteIndexNames
+     * call by checking that expandWildcardsClosed=true includes a closed index in the wildcard
+     * resolution while lenientExpandOpen (open-only) does not.
+     */
+    public void testWildcardResolutionRespectsOptionsParameter() throws Exception {
+        IndexMetadata open = IndexMetadata.builder("wc_open")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"open_col\":{\"type\":\"keyword\"}}}")
+            .state(IndexMetadata.State.OPEN)
+            .build();
+        IndexMetadata closed = IndexMetadata.builder("wc_closed")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"closed_col\":{\"type\":\"long\"}}}")
+            .state(IndexMetadata.State.CLOSE)
+            .build();
+        ClusterState state = ClusterState.builder(new ClusterName("test"))
+            .metadata(Metadata.builder().put(open, false).put(closed, false).build())
+            .build();
+
+        org.opensearch.cluster.metadata.IndexNameExpressionResolver resolver =
+            new org.opensearch.cluster.metadata.IndexNameExpressionResolver(
+                new org.opensearch.common.util.concurrent.ThreadContext(org.opensearch.common.settings.Settings.EMPTY)
+            );
+
+        // lenientExpandOpen — wildcard states = OPEN only
+        SchemaPlus schemaLenient = OpenSearchSchemaBuilder.buildSchema(state, resolver, IndicesOptions.lenientExpandOpen());
+        Table tableLenient = schemaLenient.getTable("wc*");
+        assertNotNull("wc* must resolve with lenient options", tableLenient);
+        RelDataType lenientRow = tableLenient.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(lenientRow, "open_col", SqlTypeName.VARCHAR);
+        assertNull("Closed index must NOT appear under lenient options", lenientRow.getField("closed_col", true, false));
+
+        // expandBoth — wildcard states = OPEN + CLOSED
+        IndicesOptions expandBoth = IndicesOptions.fromOptions(true, true, true, true);
+        SchemaPlus schemaBoth = OpenSearchSchemaBuilder.buildSchema(state, resolver, expandBoth);
+        Table tableBoth = schemaBoth.getTable("wc*");
+        assertNotNull("wc* must resolve with expandBoth options", tableBoth);
+        RelDataType bothRow = tableBoth.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(bothRow, "open_col", SqlTypeName.VARCHAR);
+        assertFieldType(bothRow, "closed_col", SqlTypeName.BIGINT);
+    }
+
+    /**
+     * Delegation regression guard: the 1-arg and 2-arg buildSchema overloads behave identically
+     * to the 3-arg overload with lenientExpandOpen, confirming correct delegation.
+     */
+    public void testOneArgAndTwoArgOverloadsDelegateLenient() throws Exception {
+        IndexMetadata open = IndexMetadata.builder("deleg_open")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"x\":{\"type\":\"keyword\"}}}")
+            .putAlias(AliasMetadata.builder("deleg_alias").build())
+            .state(IndexMetadata.State.OPEN)
+            .build();
+        IndexMetadata closed = IndexMetadata.builder("deleg_closed")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"y\":{\"type\":\"long\"}}}")
+            .putAlias(AliasMetadata.builder("deleg_alias").build())
+            .state(IndexMetadata.State.CLOSE)
+            .build();
+        ClusterState state = ClusterState.builder(new ClusterName("test"))
+            .metadata(Metadata.builder().put(open, false).put(closed, false).build())
+            .build();
+
+        // 1-arg overload
+        SchemaPlus schema1 = OpenSearchSchemaBuilder.buildSchema(state);
+        Table table1 = schema1.getTable("deleg_alias");
+        assertNotNull("1-arg overload must resolve alias", table1);
+        RelDataType row1 = table1.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(row1, "x", SqlTypeName.VARCHAR);
+        assertNull("1-arg overload must exclude closed backing (lenient default)", row1.getField("y", true, false));
+
+        // 2-arg overload
+        org.opensearch.cluster.metadata.IndexNameExpressionResolver resolver =
+            new org.opensearch.cluster.metadata.IndexNameExpressionResolver(
+                new org.opensearch.common.util.concurrent.ThreadContext(org.opensearch.common.settings.Settings.EMPTY)
+            );
+        SchemaPlus schema2 = OpenSearchSchemaBuilder.buildSchema(state, resolver);
+        Table table2 = schema2.getTable("deleg_alias");
+        assertNotNull("2-arg overload must resolve alias", table2);
+        RelDataType row2 = table2.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(row2, "x", SqlTypeName.VARCHAR);
+        assertNull("2-arg overload must exclude closed backing (lenient default)", row2.getField("y", true, false));
+    }
+
+    /**
+     * Falsifiable pair proving expand_wildcards controls hidden-index inclusion: a wildcard
+     * resolved with default options (open, not hidden) excludes the hidden index's unique field,
+     * while the same wildcard resolved with expand_hidden=true includes it. If both assertions
+     * produce the same result, expand_wildcards is not being honoured.
+     */
+    public void testExpandWildcardsHiddenControlsHiddenIndexInclusion() throws Exception {
+        IndexMetadata visible = IndexMetadata.builder("hw_visible")
+            .settings(settings(Version.CURRENT))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"visible_field\":{\"type\":\"keyword\"}}}")
+            .state(IndexMetadata.State.OPEN)
+            .build();
+        IndexMetadata hidden = IndexMetadata.builder("hw_hidden")
+            .settings(settings(Version.CURRENT).put("index.hidden", true))
+            .numberOfShards(1)
+            .numberOfReplicas(0)
+            .putMapping("{\"properties\":{\"hidden_field\":{\"type\":\"long\"}}}")
+            .state(IndexMetadata.State.OPEN)
+            .build();
+        ClusterState state = ClusterState.builder(new ClusterName("test"))
+            .metadata(Metadata.builder().put(visible, false).put(hidden, false).build())
+            .build();
+
+        org.opensearch.cluster.metadata.IndexNameExpressionResolver resolver =
+            new org.opensearch.cluster.metadata.IndexNameExpressionResolver(
+                new org.opensearch.common.util.concurrent.ThreadContext(org.opensearch.common.settings.Settings.EMPTY)
+            );
+
+        // Default options: open indices only, hidden NOT expanded
+        IndicesOptions defaultOpen = IndicesOptions.fromOptions(true, true, true, false, false);
+        SchemaPlus schemaDefault = OpenSearchSchemaBuilder.buildSchema(state, resolver, defaultOpen);
+        Table tableDefault = schemaDefault.getTable("hw_*");
+        // The wildcard must match the visible index but skip the hidden one
+        assertNotNull("hw_* must resolve with default options (visible index matches)", tableDefault);
+        RelDataType rowDefault = tableDefault.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(rowDefault, "visible_field", SqlTypeName.VARCHAR);
+        assertNull(
+            "Default options (hidden=false) must NOT include hidden index's field",
+            rowDefault.getField("hidden_field", true, false)
+        );
+
+        // Expand hidden: open + hidden
+        IndicesOptions withHidden = IndicesOptions.fromOptions(true, true, true, false, true);
+        SchemaPlus schemaHidden = OpenSearchSchemaBuilder.buildSchema(state, resolver, withHidden);
+        Table tableHidden = schemaHidden.getTable("hw_*");
+        assertNotNull("hw_* must resolve with hidden options", tableHidden);
+        RelDataType rowHidden = tableHidden.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(rowHidden, "visible_field", SqlTypeName.VARCHAR);
+        assertFieldType(rowHidden, "hidden_field", SqlTypeName.BIGINT);
+
+        // Falsifiability check: the two row types must differ
+        assertNotEquals(
+            "The two row types must differ — otherwise expand_wildcards is not controlling hidden-index inclusion",
+            rowDefault.getFieldCount(),
+            rowHidden.getFieldCount()
+        );
     }
 }

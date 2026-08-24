@@ -26,6 +26,7 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.OperandTypes;
 import org.apache.calcite.sql.type.ReturnTypes;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.opensearch.action.search.TransportSearchAction;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.FieldStorageResolver;
 import org.opensearch.analytics.planner.PlannerContext;
@@ -36,7 +37,6 @@ import org.opensearch.analytics.planner.dag.PlanForker;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StagePlan;
-import org.opensearch.analytics.settings.AnalyticsQuerySettings;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.spi.BackendCapabilityProvider;
 import org.opensearch.analytics.spi.DelegatedExpression;
@@ -59,7 +59,6 @@ import org.opensearch.analytics.spi.ShardScanWithDelegationInstructionNode;
 import org.opensearch.be.lucene.LuceneAnalyticsBackendPlugin;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
-import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.MappingMetadata;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.routing.GroupShardsIterator;
@@ -68,7 +67,6 @@ import org.opensearch.cluster.routing.ShardIterator;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
-import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.core.common.io.stream.NamedWriteableAwareStreamInput;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.common.io.stream.StreamInput;
@@ -108,9 +106,6 @@ import static org.mockito.Mockito.when;
  * and preserved AND/OR/NOT boolean structure).
  */
 public class FilterDelegationForIndexFullConversionTests extends OpenSearchTestCase {
-
-    /** Default resolver for DAGBuilder in tests; production injects core's resolver. */
-    private static final IndexNameExpressionResolver TEST_RESOLVER = new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY));
 
     private static final SqlFunction MATCH_FUNCTION = new SqlFunction(
         "MATCH",
@@ -242,7 +237,7 @@ public class FilterDelegationForIndexFullConversionTests extends OpenSearchTestC
         }, condition);
 
         RelNode marked = PlannerImpl.runAllOptimizations(filter, context);
-        QueryDAG dag = DAGBuilder.build(marked, context.getCapabilityRegistry(), mockClusterService(), TEST_RESOLVER);
+        QueryDAG dag = DAGBuilder.build(marked, context.getCapabilityRegistry(), mockClusterService());
         PlanForker.forkAll(dag, context.getCapabilityRegistry());
         FragmentConversionDriver.convertAll(dag, context.getCapabilityRegistry());
 
@@ -385,7 +380,7 @@ public class FilterDelegationForIndexFullConversionTests extends OpenSearchTestC
         when(clusterService.state()).thenReturn(clusterState);
         when(clusterService.operationRouting()).thenReturn(routing);
         when(routing.searchShards(any(), any(), any(), any())).thenReturn(new GroupShardsIterator<ShardIterator>(List.of()));
-        ClusterSettings clusterSettings = new ClusterSettings(Settings.EMPTY, Set.of(AnalyticsQuerySettings.MAX_SHARDS_PER_QUERY));
+        ClusterSettings clusterSettings = new ClusterSettings(Settings.EMPTY, Set.of(TransportSearchAction.SHARD_COUNT_LIMIT_SETTING));
         when(clusterService.getClusterSettings()).thenReturn(clusterSettings);
         return clusterService;
     }
@@ -464,8 +459,8 @@ public class FilterDelegationForIndexFullConversionTests extends OpenSearchTestC
         public FragmentInstructionHandlerFactory getInstructionHandlerFactory() {
             return new FragmentInstructionHandlerFactory() {
                 @Override
-                public Optional<InstructionNode> createShardScanNode(boolean requestsRowIds) {
-                    return Optional.of(new ShardScanInstructionNode(requestsRowIds));
+                public Optional<InstructionNode> createShardScanNode(boolean requestsRowIds, String logicalTableName) {
+                    return Optional.of(new ShardScanInstructionNode(requestsRowIds, logicalTableName));
                 }
 
                 @Override
@@ -481,9 +476,12 @@ public class FilterDelegationForIndexFullConversionTests extends OpenSearchTestC
                 public Optional<InstructionNode> createShardScanWithDelegationNode(
                     FilterTreeShape treeShape,
                     int delegatedPredicateCount,
-                    boolean requestsRowIds
+                    boolean requestsRowIds,
+                    String logicalTableName
                 ) {
-                    return Optional.of(new ShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount, requestsRowIds));
+                    return Optional.of(
+                        new ShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount, requestsRowIds, logicalTableName)
+                    );
                 }
 
                 @Override

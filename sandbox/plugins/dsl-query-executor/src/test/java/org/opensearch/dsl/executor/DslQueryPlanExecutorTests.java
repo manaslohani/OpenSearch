@@ -10,6 +10,7 @@ package org.opensearch.dsl.executor;
 
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.opensearch.action.support.PlainActionFuture;
+import org.opensearch.analytics.QueryRequestContext;
 import org.opensearch.dsl.TestUtils;
 import org.opensearch.dsl.result.ExecutionResult;
 import org.opensearch.test.OpenSearchTestCase;
@@ -33,7 +34,7 @@ public class DslQueryPlanExecutorTests extends OpenSearchTestCase {
         QueryPlans plans = new QueryPlans.Builder().add(new QueryPlans.QueryPlan(QueryPlans.Type.HITS, scan)).build();
 
         PlainActionFuture<List<ExecutionResult>> future = new PlainActionFuture<>();
-        executor.execute(plans, future);
+        executor.execute(plans, null, future);
         List<ExecutionResult> results = future.actionGet();
 
         assertEquals(1, results.size());
@@ -43,9 +44,46 @@ public class DslQueryPlanExecutorTests extends OpenSearchTestCase {
         assertNotNull(result.getPlan());
         assertSame(scan, result.getPlan().relNode());
         assertEquals(
-            List.of("name", "price", "brand", "rating", "created_date", "is_active", "timestamp", "location", "status", "binary_data"),
+            List.of(
+                "name",
+                "price",
+                "brand",
+                "rating",
+                "created_date",
+                "is_active",
+                "timestamp",
+                "location",
+                "status",
+                "binary_data",
+                "event_time",
+                "ip_address",
+                "event_nanos",
+                "scaled_price",
+                "unsigned_counter",
+                "tiny_val",
+                "small_val",
+                "float_val"
+            ),
             result.getFieldNames()
         );
+    }
+
+    public void testExecutePassesQueryRequestContextToEngine() {
+        List<Object[]> expectedRows = List.<Object[]>of(new Object[] { "laptop", 1200 });
+        QueryRequestContext queryCtx = new QueryRequestContext(null, null);
+
+        java.util.concurrent.atomic.AtomicReference<QueryRequestContext> captured = new java.util.concurrent.atomic.AtomicReference<>();
+        DslQueryPlanExecutor executor = new DslQueryPlanExecutor((plan, ctx, listener) -> {
+            captured.set(ctx);
+            listener.onResponse(expectedRows);
+        });
+        QueryPlans plans = new QueryPlans.Builder().add(new QueryPlans.QueryPlan(QueryPlans.Type.HITS, scan)).build();
+
+        PlainActionFuture<List<ExecutionResult>> future = new PlainActionFuture<>();
+        executor.execute(plans, queryCtx, future);
+        future.actionGet();
+
+        assertSame("QueryRequestContext must be forwarded to engine executor", queryCtx, captured.get());
     }
 
     // TODO: add test with multiple plans (HITS + AGGREGATION) to verify iteration order

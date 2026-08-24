@@ -31,6 +31,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Builds a Calcite {@link SchemaPlus} from OpenSearch {@link ClusterState} index mappings.
@@ -39,6 +41,12 @@ import java.util.Map;
  * Navigates: IndexMetadata -> MappingMetadata -> sourceAsMap() -> "properties" -> per-field "type".
  */
 public class OpenSearchSchemaBuilder {
+
+    private static final Logger LOGGER = Logger.getLogger(OpenSearchSchemaBuilder.class.getName());
+
+    private static final String SCALING_FACTOR_FIELD = "scaling_factor";
+
+    private static final double NO_SCALING_FACTOR = Double.NaN;
 
     private OpenSearchSchemaBuilder() {}
 
@@ -62,6 +70,15 @@ public class OpenSearchSchemaBuilder {
      * that drives lazy resolution of expressions.
      */
     public static SchemaPlus buildSchema(ClusterState clusterState, IndexNameExpressionResolver resolver) {
+        return buildSchema(clusterState, resolver, IndicesOptions.lenientExpandOpen());
+    }
+
+    /**
+     * Options-aware schema construction: resolves tables using the supplied {@code IndicesOptions}.
+     *
+     * @param options controls wildcard expansion and alias backing-index state filtering
+     */
+    public static SchemaPlus buildSchema(ClusterState clusterState, IndexNameExpressionResolver resolver, IndicesOptions options) {
         Schema lazySchema = new AbstractSchema() {
             // Truly lazy table map, mirroring sql-plugin's OpenSearchSchema pattern: no upfront
             // enumeration of cluster indices. get() registers on first lookup and caches under the
@@ -75,7 +92,7 @@ public class OpenSearchSchemaBuilder {
                 public Table get(Object key) {
                     String name = ((String) key).toLowerCase(java.util.Locale.ROOT);
                     if (!super.containsKey(name)) {
-                        Table resolved = resolveTable(clusterState, resolver, name);
+                        Table resolved = resolveTable(clusterState, resolver, name, options);
                         if (resolved != null) {
                             super.put(name, resolved);
                         }
@@ -103,7 +120,12 @@ public class OpenSearchSchemaBuilder {
      * is referenced.
      */
     @SuppressWarnings("unchecked")
-    private static Table resolveTable(ClusterState clusterState, IndexNameExpressionResolver resolver, String expression) {
+    private static Table resolveTable(
+        ClusterState clusterState,
+        IndexNameExpressionResolver resolver,
+        String expression,
+        IndicesOptions options
+    ) {
         // Short-circuit literal alias / data stream names so the resolver's lenientExpandOpen
         // (which does not include hidden backings) doesn't filter out data stream backings. The
         // alias / data-stream abstraction already carries the full backing list — use it directly.
@@ -113,7 +135,19 @@ public class OpenSearchSchemaBuilder {
         if (abstraction != null
             && (abstraction.getType() == org.opensearch.cluster.metadata.IndexAbstraction.Type.ALIAS
                 || abstraction.getType() == org.opensearch.cluster.metadata.IndexAbstraction.Type.DATA_STREAM)) {
-            backing = abstraction.getIndices();
+            // WHY: IndexAbstraction.getIndices() returns ALL backings regardless of state.
+            // The schema's column set must never exceed the union of mappings of the indices
+            // the planner will actually target. IndexResolution.resolveAlias/resolveDataStream
+            // UNCONDITIONALLY filters to State.OPEN, so the schema must do the same —
+            // regardless of IndicesOptions. Without this, a closed backing's columns appear in
+            // the union row type even though no shard ever supplies them (phantom-column defect).
+            List<IndexMetadata> allBackings = abstraction.getIndices();
+            backing = new java.util.ArrayList<>(allBackings.size());
+            for (IndexMetadata idx : allBackings) {
+                if (idx.getState() == IndexMetadata.State.OPEN) {
+                    backing.add(idx);
+                }
+            }
         } else {
             String[] concrete;
             try {
@@ -123,12 +157,7 @@ public class OpenSearchSchemaBuilder {
                 // expand to its backings (the resolver normally excludes data streams from
                 // wildcard expansion otherwise). Literal data stream / alias names take the
                 // abstraction short-circuit above and skip the resolver entirely.
-                concrete = resolver.concreteIndexNames(
-                    clusterState,
-                    IndicesOptions.lenientExpandOpen(),
-                    true,
-                    Strings.splitStringByCommaToArray(expression)
-                );
+                concrete = resolver.concreteIndexNames(clusterState, options, true, Strings.splitStringByCommaToArray(expression));
             } catch (IndexNotFoundException e) {
                 return null;
             }
@@ -245,6 +274,15 @@ public class OpenSearchSchemaBuilder {
 
     /** Format-aware overload: classifies {@code date}/{@code date_nanos} into DateOnly / TimeOnly UDT markers. */
     public static RelDataType buildLeafType(String opensearchType, String format, RelDataTypeFactory typeFactory) {
+        return buildLeafType(opensearchType, format, NO_SCALING_FACTOR, typeFactory);
+    }
+
+    /**
+     * Full overload: handles format-aware date classification and scaled_float factor injection.
+     *
+     * @param scalingFactor positive factor for scaled_float fields; NaN when not applicable
+     */
+    public static RelDataType buildLeafType(String opensearchType, String format, double scalingFactor, RelDataTypeFactory typeFactory) {
         if (opensearchType == null) {
             return null;
         }
@@ -253,6 +291,21 @@ public class OpenSearchSchemaBuilder {
         }
         if (BinaryType.NAME.equals(opensearchType)) {
             return BinaryType.nullable();
+        }
+        if (UnsignedLongType.NAME.equals(opensearchType)) {
+            // mapFieldType still returns BIGINT for unsigned_long; the UnsignedLongType marker
+            // enables translator guards (negative-bound clamping, overflow rejection for values
+            // above Long.MAX_VALUE) without affecting planner coercion.
+            return UnsignedLongType.nullable(typeFactory);
+        }
+        if ("scaled_float".equals(opensearchType)) {
+            if (Double.isNaN(scalingFactor) || scalingFactor <= 0) {
+                // Missing, zero, or negative factor — exclude field from schema (matches how
+                // unrecognized types are dropped). Legacy requires scaling_factor > 0 at index
+                // creation; this guards only corrupted/hand-edited mappings.
+                return null;
+            }
+            return ScaledFloatType.nullable(typeFactory, scalingFactor);
         }
         if ("date".equals(opensearchType) || "date_nanos".equals(opensearchType)) {
             int precision = "date_nanos".equals(opensearchType) ? 9 : 3;
@@ -328,7 +381,8 @@ public class OpenSearchSchemaBuilder {
                 continue;
             }
             String format = (String) fieldProps.get("format");
-            RelDataType columnType = buildLeafType(fieldType, format, typeFactory);
+            double scalingFactor = parseScalingFactor(fieldProps.get(SCALING_FACTOR_FIELD));
+            RelDataType columnType = buildLeafType(fieldType, format, scalingFactor, typeFactory);
             if (columnType == null) {
                 // Unsupported (geo_point/shape/completion/…) or unknown plugin type. Drop the
                 // column; a query referencing it surfaces a Calcite "column not found" via the
@@ -336,6 +390,26 @@ public class OpenSearchSchemaBuilder {
                 continue;
             }
             builder.add(fieldName, columnType);
+        }
+    }
+
+    /**
+     * Normalizes a scaling_factor value (Number or String from mapping JSON) to a double.
+     * Returns {@link Double#NaN} when the value is null or unparseable, signaling the caller
+     * to exclude the field.
+     */
+    static double parseScalingFactor(Object raw) {
+        if (raw == null) {
+            return NO_SCALING_FACTOR;
+        }
+        try {
+            if (raw instanceof Number) {
+                return ((Number) raw).doubleValue();
+            }
+            return Double.parseDouble(raw.toString());
+        } catch (NumberFormatException e) {
+            LOGGER.log(Level.WARNING, "Invalid scaling_factor value: " + raw, e);
+            return NO_SCALING_FACTOR;
         }
     }
 }

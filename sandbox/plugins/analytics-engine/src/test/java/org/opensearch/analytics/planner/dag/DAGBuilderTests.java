@@ -58,7 +58,7 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
         LOGGER.info("Input RelNode:\n{}", RelOptUtil.toString(logicalPlan));
         RelNode cboOutput = runPlanner(logicalPlan, context);
         LOGGER.info("Marked+CBO RelNode:\n{}", RelOptUtil.toString(cboOutput));
-        QueryDAG dag = DAGBuilder.build(cboOutput, context.getCapabilityRegistry(), mockClusterService(), TEST_RESOLVER);
+        QueryDAG dag = DAGBuilder.build(cboOutput, context.getCapabilityRegistry(), mockClusterService());
         LOGGER.info("QueryDAG:\n{}", dag);
         return dag;
     }
@@ -128,7 +128,7 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
         // For a multi-shard scan, the planner inserts an OpenSearchExchangeReducer at the root.
         OpenSearchExchangeReducer originalReducer = (OpenSearchExchangeReducer) cbo;
 
-        ExchangeInfo customInfo = new ExchangeInfo(RelDistribution.Type.HASH_DISTRIBUTED, List.of(0));
+        ExchangeInfo customInfo = ExchangeInfo.hashDistributed(List.of(0), /* partitionCount */ 2);
         OpenSearchExchangeReducer customReducer = new OpenSearchExchangeReducer(
             originalReducer.getCluster(),
             originalReducer.getTraitSet(),
@@ -137,7 +137,7 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
             customInfo
         );
 
-        QueryDAG dag = DAGBuilder.build(customReducer, context.getCapabilityRegistry(), mockClusterService(), TEST_RESOLVER);
+        QueryDAG dag = DAGBuilder.build(customReducer, context.getCapabilityRegistry(), mockClusterService());
         Stage child = dag.rootStage().getChildStages().get(0);
         assertEquals(customInfo, child.getExchangeInfo());
     }
@@ -178,7 +178,7 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
         );
         RelNode parsed = SqlPlannerTestFixture.parseSql(sql, state);
         RelNode cbo = PlannerImpl.runAllOptimizations(parsed, context);
-        QueryDAG dag = DAGBuilder.build(cbo, context.getCapabilityRegistry(), mockClusterService(), TEST_RESOLVER);
+        QueryDAG dag = DAGBuilder.build(cbo, context.getCapabilityRegistry(), mockClusterService());
         LOGGER.info("QTF QueryDAG:\n{}", dag);
         return dag;
     }
@@ -331,7 +331,7 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
 
         // Build DAG + run conversion. The bug is that Stage 3 (root) gets a bare StageInputScan
         // and convertReduceNode trips on getInputs().getFirst().
-        QueryDAG dag = DAGBuilder.build(cbo, context.getCapabilityRegistry(), mockClusterService(), TEST_RESOLVER);
+        QueryDAG dag = DAGBuilder.build(cbo, context.getCapabilityRegistry(), mockClusterService());
         LOGGER.info("QueryDAG:\n{}", dag);
         PlanForker.forkAll(dag, context.getCapabilityRegistry());
         FragmentConversionDriver.convertAll(dag, context.getCapabilityRegistry());
@@ -403,7 +403,7 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
         assertNotNull("QTF should fire", wrapper);
         assertNotSame("Outer Project should sit above the LM wrapper", wrapper, RelNodeUtils.unwrapHep(cbo));
 
-        QueryDAG dag = DAGBuilder.build(cbo, context.getCapabilityRegistry(), mockClusterService(), TEST_RESOLVER);
+        QueryDAG dag = DAGBuilder.build(cbo, context.getCapabilityRegistry(), mockClusterService());
         LOGGER.info("QueryDAG:\n{}", dag);
         PlanForker.forkAll(dag, context.getCapabilityRegistry());
         FragmentConversionDriver.convertAll(dag, context.getCapabilityRegistry());
