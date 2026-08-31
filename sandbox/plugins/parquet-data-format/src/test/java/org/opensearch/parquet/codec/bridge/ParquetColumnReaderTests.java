@@ -23,7 +23,9 @@ import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.lucene.util.NumericUtils;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.nativebridge.spi.ArrowExport;
+import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.NativeParquetWriter;
 import org.opensearch.parquet.bridge.ParquetSortConfig;
 import org.opensearch.parquet.bridge.RustBridge;
@@ -59,6 +61,56 @@ public class ParquetColumnReaderTests extends OpenSearchTestCase {
 
     private static long expected(long row) {
         return row * 7 + 1;
+    }
+
+    public void testConfiguredMaxBatchSizeCapsEveryBatch() throws Exception {
+        int rowCount = 2000;
+        int maxBatchSize = 16;
+        Path file = createTempDir().resolve("capped.parquet");
+        writeLongColumn(file, rowCount, false, -1);
+
+        // The window doubles on a dense scan, so without a ceiling it would grow past 16 quickly.
+        try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN, 4, maxBatchSize)) {
+            for (long row = 0; row < rowCount; row++) {
+                reader.loadBatchContaining(row);
+                DecodedBatch batch = reader.decodedBatch();
+                long rows = batch.lastRow() - batch.firstRow() + 1;
+                assertTrue("batch at row " + row + " held " + rows + " rows, cap is " + maxBatchSize, rows <= maxBatchSize);
+                assertEquals("value at row " + row, expected(row), batch.valueAt(row));
+            }
+        }
+    }
+
+    public void testSettingsResolveTheWindowSizes() throws Exception {
+        int rowCount = 300;
+        Path file = createTempDir().resolve("settings.parquet");
+        writeLongColumn(file, rowCount, false, -1);
+
+        Settings settings = Settings.builder()
+            .put(ParquetSettings.DOCVALUES_INITIAL_BATCH_SIZE.getKey(), 8)
+            .put(ParquetSettings.DOCVALUES_MAX_BATCH_SIZE.getKey(), 8)
+            .build();
+
+        // Initial equal to the ceiling means the window can never grow, so every batch is 8 rows.
+        try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN, settings)) {
+            reader.loadBatchContaining(0);
+            DecodedBatch first = reader.decodedBatch();
+            assertEquals(0L, first.firstRow());
+            assertEquals(7L, first.lastRow());
+
+            reader.loadBatchContaining(8);
+            DecodedBatch second = reader.decodedBatch();
+            assertEquals(8L, second.firstRow());
+            assertEquals(15L, second.lastRow());
+        }
+    }
+
+    public void testInitialWindowAboveTheCeilingIsRejected() throws Exception {
+        Path file = createTempDir().resolve("invalid.parquet");
+        writeLongColumn(file, 100, false, -1);
+
+        IOException failure = expectThrows(IOException.class, () -> ParquetColumnReader.open(file, COLUMN, 64, 16));
+        assertTrue(failure.getMessage(), failure.getMessage().contains("initial batch size"));
     }
 
     public void testAscendingWalkReloadsBatches() throws Exception {
