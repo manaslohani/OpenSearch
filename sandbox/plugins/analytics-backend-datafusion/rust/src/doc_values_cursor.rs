@@ -75,6 +75,9 @@ const RC_EOF: i64 = 2;
 /// `ParquetColumnReader.LOCAL_STORE` on the Java side.
 const LOCAL_STORE: i64 = 0;
 
+/// Footer marker set when the writer stored each row's values ascending; lets the reader skip its sort.
+const VALUES_SORTED_KEY: &str = "opensearch.values_sorted";
+
 static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1); // 0 is never a live handle
 static CURSORS: Lazy<DashMap<i64, Arc<Mutex<DocValuesCursor>>>> = Lazy::new(DashMap::new);
 
@@ -890,9 +893,9 @@ pub unsafe extern "C" fn parquet_df_open_iter(
 /// Reads through `store_ptr`, and on the local path costs no extra IO once a cursor has been opened,
 /// because both share the global footer cache.
 ///
-/// Writes `out_num_rows`, `out_format_version`, and `out_writer_generation` only on success; a caller
-/// that gets a negative return must not read them. `out_writer_generation` is set to `-1` when the
-/// footer carries no parseable `opensearch.writer_generation` stamp (i.e. unstamped).
+/// Writes `out_num_rows`, `out_format_version`, `out_writer_generation`, and `out_values_sorted`
+/// only on success; a caller that gets a negative return must not read them. `out_writer_generation`
+/// is set to `-1` when the footer carries no parseable `opensearch.writer_generation` stamp (i.e. unstamped).
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn parquet_df_file_metadata(
@@ -903,10 +906,16 @@ pub unsafe extern "C" fn parquet_df_file_metadata(
     out_num_rows: *mut i64,
     out_format_version: *mut i64,
     out_writer_generation: *mut i64,
+    // `opensearch.values_sorted` as 0/1; i64 rather than bool for a stable FFI ABI.
+    out_values_sorted: *mut i64,
 ) -> i64 {
     static FN: &str = "parquet_df_file_metadata";
     let filename = str_from_raw(file_ptr, file_len).map_err(|e| format!("{FN} file: {e}"))?;
-    if out_num_rows.is_null() || out_format_version.is_null() || out_writer_generation.is_null() {
+    if out_num_rows.is_null()
+        || out_format_version.is_null()
+        || out_writer_generation.is_null()
+        || out_values_sorted.is_null()
+    {
         return Err(format!("{FN}: null out-parameter"));
     }
     let runtime = io_runtime().map_err(|e| format!("{FN}: {e}"))?;
@@ -955,9 +964,15 @@ pub unsafe extern "C" fn parquet_df_file_metadata(
                 .and_then(|v| v.parse::<i64>().ok())
         })
         .unwrap_or(-1);
+    // Only the literal "true" permits skipping the read-side sort; absent or any other value fails closed.
+    let values_sorted = file_metadata
+        .key_value_metadata()
+        .and_then(|kvs| kvs.iter().find(|kv| kv.key == VALUES_SORTED_KEY))
+        .map_or(false, |kv| kv.value.as_deref() == Some("true"));
     *out_num_rows = file_metadata.num_rows();
     *out_format_version = format_version;
     *out_writer_generation = writer_generation;
+    *out_values_sorted = values_sorted as i64;
     Ok(RC_OK)
 }
 
@@ -2936,6 +2951,7 @@ mod ffm_tests {
             // Seed with a non-sentinel so the assertion below proves the call wrote -1, rather than
             // merely leaving the seed untouched.
             let mut writer_generation = i64::MIN;
+            let mut values_sorted = -2i64; // sentinel distinct from the 0/1 the call writes
             let rc = parquet_df_file_metadata(
                 path.as_ptr(),
                 path.len() as i64,
@@ -2943,8 +2959,13 @@ mod ffm_tests {
                 &mut num_rows,
                 &mut format_version,
                 &mut writer_generation,
+                &mut values_sorted,
             );
             assert_eq!(rc, RC_OK, "{}", error_message(rc));
+            assert_eq!(
+                values_sorted, 0,
+                "an Arrow-written fixture stamps no values_sorted marker, so it must read back as 0 (fail closed)"
+            );
             (num_rows, format_version, writer_generation)
         };
         assert_eq!(

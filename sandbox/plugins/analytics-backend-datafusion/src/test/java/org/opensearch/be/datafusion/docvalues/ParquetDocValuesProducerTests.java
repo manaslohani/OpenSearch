@@ -8,7 +8,13 @@
 
 package org.opensearch.be.datafusion.docvalues;
 
+import org.apache.lucene.index.DocValues;
+import org.apache.lucene.index.NumericDocValues;
+import org.apache.lucene.index.SortedNumericDocValues;
+import org.opensearch.be.datafusion.docvalues.bridge.DecodedListBatch;
+import org.opensearch.be.datafusion.docvalues.bridge.ListValueReader;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetCodecBridge;
+import org.opensearch.be.datafusion.docvalues.iter.ParquetSortedNumericDocValues;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
 import org.opensearch.test.OpenSearchTestCase;
@@ -104,5 +110,64 @@ public class ParquetDocValuesProducerTests extends OpenSearchTestCase {
             IOException.class,
             () -> ParquetDocValuesProducer.checkWriterGeneration("7", ParquetCodecBridge.WRITER_GENERATION_UNKNOWN, file, segment)
         );
+    }
+
+    /**
+     * The list iterator must not be a singleton wrap, or value sources would collapse it to one value per doc.
+     */
+    public void testMultiValuedIteratorIsNotASingletonWrap() {
+        SortedNumericDocValues multiValued = new ParquetSortedNumericDocValues(nullListReader(), 1, false);
+        assertNull("the multi-valued iterator must not unwrap to a singleton", DocValues.unwrapSingleton(multiValued));
+
+        SortedNumericDocValues singleValued = DocValues.singleton(constantNumeric());
+        assertNotNull("the single-valued path must unwrap to its inner numeric iterator", DocValues.unwrapSingleton(singleValued));
+    }
+
+    private static ListValueReader nullListReader() {
+        return new ListValueReader() {
+            @Override
+            public DecodedListBatch decodedListBatch() {
+                return null;
+            }
+
+            @Override
+            public void loadListBatchContaining(long row) {
+                // unwrapSingleton inspects only the iterator's type, so no batch is needed here.
+            }
+        };
+    }
+
+    private static NumericDocValues constantNumeric() {
+        return new NumericDocValues() {
+            @Override
+            public long longValue() {
+                return 0L;
+            }
+
+            @Override
+            public boolean advanceExact(int target) {
+                return true;
+            }
+
+            @Override
+            public int docID() {
+                return -1;
+            }
+
+            @Override
+            public int nextDoc() {
+                return NO_MORE_DOCS;
+            }
+
+            @Override
+            public int advance(int target) {
+                return NO_MORE_DOCS;
+            }
+
+            @Override
+            public long cost() {
+                return 0L;
+            }
+        };
     }
 }

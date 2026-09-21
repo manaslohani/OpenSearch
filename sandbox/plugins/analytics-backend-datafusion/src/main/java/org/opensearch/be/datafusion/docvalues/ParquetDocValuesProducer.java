@@ -21,10 +21,12 @@ import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetCodecBridge;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetColumnReader;
+import org.opensearch.be.datafusion.docvalues.bridge.ParquetListColumnReader;
 import org.opensearch.be.datafusion.docvalues.iter.BinaryFramingDocValues;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetBinaryDocValues;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetNumericDocValues;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetSortedDocValues;
+import org.opensearch.be.datafusion.docvalues.iter.ParquetSortedNumericDocValues;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
@@ -32,6 +34,8 @@ import org.opensearch.index.mapper.MapperService;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Read-only {@link DocValuesProducer} that serves single-valued numeric doc values from a Parquet
@@ -85,8 +89,17 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private final Settings indexSettings;
     private final int maxDoc;
     private final long parquetRowCount;
+    /**
+     * Footer {@code opensearch.values_sorted} marker, read once per segment; false keeps the read-side sort.
+     */
+    private final boolean valuesSorted;
 
     private volatile boolean closed;
+
+    /**
+     * Per-column physical shape (repeated vs scalar), memoized since a segment's shape is fixed once written.
+     */
+    private final Map<String, Boolean> repeatedColumns = new ConcurrentHashMap<>();
 
     /**
      * @param mapperService resolves OpenSearch mapping types for DV-type validation (may be
@@ -123,6 +136,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
             state.segmentInfo.name
         );
         this.parquetRowCount = metadata.numRows();
+        this.valuesSorted = metadata.valuesSorted();
     }
 
     /**
@@ -137,6 +151,8 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         this.maxDoc = maxDoc;
         this.mapperService = mapperService;
         this.parquetRowCount = maxDoc;
+        // No footer is read on this seam, so the iterator always sorts.
+        this.valuesSorted = false;
     }
 
     @Override
@@ -157,17 +173,34 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     }
 
     /**
-     * Serves {@code field} as a singleton over a dedicated forward-only cursor, recorded on
-     * {@code cursors} so the calling request closes it when it ends.
-     *
-     * <p>Ingest rejects multi-valued numerics (ParquetDocumentInput), so every numeric column on disk
-     * is single-valued and this singleton wrap is exact; OpenSearch value sources recover the inner
-     * iterator via {@code DocValues.unwrapSingleton}.
+     * Serves {@code field} over a dedicated cursor recorded on {@code cursors}; LIST columns go through
+     * {@link ParquetSortedNumericDocValues}, scalar columns through {@code DocValues.singleton}.
      */
-    // TODO(multi-value): no repeated read path; the write path emits single values only.
     SortedNumericDocValues getSortedNumeric(FieldInfo field, CursorRegistry cursors) throws IOException {
         validate(field, DocValuesType.SORTED_NUMERIC);
+        if (isRepeated(field)) {
+            // Routing is by physical shape: a pre-promotion scalar segment would fail the native list downcast.
+            return new ParquetSortedNumericDocValues(openListCursor(field.getName(), cursors), maxDoc, valuesSorted);
+        }
+        // Scalar column, including a pre-promotion segment of a multi-valued field.
         return DocValues.singleton(new ParquetNumericDocValues(openCursor(field.getName(), cursors), maxDoc));
+    }
+
+    /**
+     * Whether {@code field}'s column is physically a Parquet LIST in this segment, read from the file
+     * schema rather than the mapping; probed once per column and memoized.
+     */
+    boolean isRepeated(FieldInfo field) throws IOException {
+        Boolean cached = repeatedColumns.get(field.getName());
+        if (cached != null) {
+            return cached;
+        }
+        boolean repeated;
+        try (ParquetColumnReader probe = ParquetColumnReader.open(parquetFile, field.getName(), indexSettings, storePointer)) {
+            repeated = probe.isPhysicallyRepeated();
+        }
+        repeatedColumns.put(field.getName(), repeated);
+        return repeated;
     }
 
     @Override
@@ -399,6 +432,15 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
      */
     private ParquetColumnReader openBinaryCursor(String field) throws IOException {
         return ParquetColumnReader.openBinary(parquetFile, field, indexSettings, storePointer);
+    }
+
+    /**
+     * Opens a list cursor for one multi-valued iterator, released with the request's {@code cursors}.
+     */
+    private ParquetListColumnReader openListCursor(String field, CursorRegistry cursors) throws IOException {
+        ParquetListColumnReader reader = ParquetListColumnReader.open(parquetFile, field, indexSettings, storePointer);
+        cursors.register(reader);
+        return reader;
     }
 
     private UnsupportedOperationException unsupported(String kind, FieldInfo field) {

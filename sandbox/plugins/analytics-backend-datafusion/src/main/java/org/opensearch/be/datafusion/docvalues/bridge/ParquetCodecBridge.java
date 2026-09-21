@@ -145,7 +145,8 @@ public final class ParquetCodecBridge {
                 ValueLayout.JAVA_LONG,  // store_ptr
                 ValueLayout.ADDRESS,    // out_num_rows
                 ValueLayout.ADDRESS,    // out_format_version
-                ValueLayout.ADDRESS     // out_writer_generation
+                ValueLayout.ADDRESS,    // out_writer_generation
+                ValueLayout.ADDRESS     // out_values_sorted
             )
         );
         COLUMN_NON_NULL_COUNT = linker.downcallHandle(
@@ -196,8 +197,9 @@ public final class ParquetCodecBridge {
      *                                if the file carries no parseable stamp
      * @param writerGeneration        the {@code opensearch.writer_generation} footer stamp, or
      *                                {@link #WRITER_GENERATION_UNKNOWN} if the file carries no parseable stamp
+     * @param valuesSorted            whether the footer marks each row's values ascending; absent reads false
      */
-    public record FileMetadata(long numRows, long opensearchFormatVersion, long writerGeneration) {
+    public record FileMetadata(long numRows, long opensearchFormatVersion, long writerGeneration, boolean valuesSorted) {
     }
 
     /**
@@ -216,11 +218,23 @@ public final class ParquetCodecBridge {
             var numRowsOut = call.longOut();
             var formatVersionOut = call.longOut();
             var writerGenerationOut = call.longOut();
-            call.invokeIO(FILE_METADATA, f.segment(), f.len(), storePtr, numRowsOut, formatVersionOut, writerGenerationOut);
+            var valuesSortedOut = call.longOut();
+            call.invokeIO(
+                FILE_METADATA,
+                f.segment(),
+                f.len(),
+                storePtr,
+                numRowsOut,
+                formatVersionOut,
+                writerGenerationOut,
+                valuesSortedOut
+            );
             return new FileMetadata(
                 numRowsOut.get(ValueLayout.JAVA_LONG, 0),
                 formatVersionOut.get(ValueLayout.JAVA_LONG, 0),
-                writerGenerationOut.get(ValueLayout.JAVA_LONG, 0)
+                writerGenerationOut.get(ValueLayout.JAVA_LONG, 0),
+                // 0/1 over an i64 out-param.
+                valuesSortedOut.get(ValueLayout.JAVA_LONG, 0) != 0
             );
         }
     }

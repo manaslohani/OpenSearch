@@ -89,9 +89,8 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
                 return null;
             }
             // OpenSearch numeric value sources request SORTED_NUMERIC even for single-valued fields,
-            // then call DocValues.unwrapSingleton(...). The producer serves this as a singleton over
-            // the single-valued numeric iterator (docId == Parquet row, asserted here). The cursor is
-            // recorded on this request's registry and closed when the request ends.
+            // then call DocValues.unwrapSingleton(...). The producer serves scalar columns as a singleton and LIST
+            // columns as the multi-valued iterator (docId == Parquet row, asserted here); the cursor closes with the request.
             assert resources.assertRowIdsAreIdentity(in) : "non-identity __row_id__ segment reached the Parquet doc-values read path";
             return resources.producer.getSortedNumeric(fi, cursors);
         }

@@ -18,6 +18,7 @@ import org.apache.arrow.vector.complex.impl.UnionListWriter;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.opensearch.be.datafusion.docvalues.iter.ParquetSortedNumericDocValues;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.nativebridge.spi.ArrowExport;
 import org.opensearch.parquet.bridge.NativeParquetWriter;
@@ -140,6 +141,46 @@ public class ParquetListColumnReaderTests extends DataFusionBackedTestCase {
         for (int i = 0; i < rows[row].length; i++) {
             assertTrue("row " + row + " value " + i + " present", children.isPresent(start + i));
             assertEquals("row " + row + " value " + i, rows[row][i], children.valueAt(start + i));
+        }
+    }
+
+    /**
+     * doc0 = [7, 2, 5] and doc1 = [4, 1] must yield sum 19, count 5, min 1, max 7, avg 3.8, which a
+     * first-value-only reader ([7, 4]) cannot produce. No values_sorted marker, so the iterator sorts.
+     */
+    public void testMultiValuedAggregationSemanticsThroughTheIterator() throws Exception {
+        long[][] rows = { { 7, 2, 5 }, { 4, 1 } };
+        Path file = createTempDir().resolve("agg-lists.parquet");
+        writeLongListColumn(file, rows);
+
+        try (ParquetListColumnReader reader = ParquetListColumnReader.open(file, COLUMN)) {
+            // No marker on this fixture, so the iterator must sort.
+            ParquetSortedNumericDocValues dv = new ParquetSortedNumericDocValues(reader, rows.length, false);
+
+            long sum = 0;
+            long valueCount = 0;
+            long min = Long.MAX_VALUE;
+            long max = Long.MIN_VALUE;
+            for (int doc = 0; doc < rows.length; doc++) {
+                assertTrue("doc " + doc + " must have values", dv.advanceExact(doc));
+                int count = dv.docValueCount();
+                long previous = Long.MIN_VALUE;
+                for (int i = 0; i < count; i++) {
+                    long value = dv.nextValue();
+                    assertTrue("doc " + doc + " values must be ascending (min first)", value >= previous);
+                    previous = value;
+                    sum += value;
+                    valueCount++;
+                    min = Math.min(min, value);
+                    max = Math.max(max, value);
+                }
+            }
+
+            assertEquals("value_count over all list values", 5, valueCount);
+            assertEquals("sum over all list values", 19, sum);
+            assertEquals("min over all list values", 1, min);
+            assertEquals("max over all list values", 7, max);
+            assertEquals("avg over all list values", 3.8, (double) sum / valueCount, 0.0);
         }
     }
 
