@@ -380,6 +380,11 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
         // TODO Check what is the right way to get this information as the below one is leaky
         // https://github.com/opensearch-project/OpenSearch/issues/21506
         List<String> secondaryFormats = engineConfig.getIndexSettings().getSettings().getAsList("index.composite.secondary_data_formats");
+        if (secondaryFormats.isEmpty()) {
+            secondaryFormats = engineConfig.getIndexSettings()
+                .getSettings()
+                .getAsList("archived.index.composite.secondary_data_formats");
+        }
         boolean isSecondary = secondaryFormats.contains("lucene");
 
         if (isSecondary) {
