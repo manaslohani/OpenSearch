@@ -141,8 +141,8 @@ public class CompositeDataFormatPlugin extends Plugin implements DataFormatPlugi
      */
     public static final Setting<List<String>> SECONDARY_DATA_FORMATS = Setting.listSetting(
         "index.composite.secondary_data_formats",
-        Collections.emptyList(),
         s -> s,
+        settings -> settings.getAsList("archived.index.composite.secondary_data_formats"),
         Setting.Property.IndexScope,
         Setting.Property.Final
     );
