@@ -556,6 +556,51 @@ unsafe fn copy_binary_values_out(
     Ok(())
 }
 
+/// `next_list_batch` borrows: a single-level repeated column whose leaf has a `BorrowKind`.
+fn check_list_shape(cursor: &DocValuesCursor, fn_name: &str) -> Result<(), String> {
+    if !cursor.repeated || !cursor.borrowable {
+        return Err(format!(
+            "{fn_name}: column is repeated={}, borrowable={}; use the batch output matching that shape",
+            cursor.repeated, cursor.borrowable
+        ));
+    }
+    Ok(())
+}
+
+/// Shared prologue for the batch entry points: locks the cursor, checks the column shape the
+/// entry point serves, releases any prior borrow, advances to `target_row`, validates the row
+/// count. Returns `None` at end-of-column.
+///
+/// Takes the caller-owned `&Arc<Mutex<..>>` because the returned guard borrows from it, so the Arc must outlive the guard.
+fn prepare_batch<'a>(
+    cursor: &'a Arc<Mutex<DocValuesCursor>>,
+    target_row: i64,
+    fn_name: &str,
+    check_shape: fn(&DocValuesCursor, &str) -> Result<(), String>,
+) -> Result<Option<(parking_lot::MutexGuard<'a, DocValuesCursor>, RecordBatch, usize)>, String> {
+    let mut cursor = cursor.lock();
+    check_shape(&cursor, fn_name)?;
+
+    // Released here rather than on success, so no early return below leaves buffers held. Java
+    // clears its resident batch before calling. The reservation follows the batch.
+    cursor.borrowed_batch = None;
+    cursor.reservation.resize(0);
+
+    if at_eof(&cursor, target_row, fn_name).map_err(|e| e.to_string())? {
+        return Ok(None); // target is past the last row (e.g. a scan running off the end)
+    }
+
+    let batch = cursor.next_batch(target_row).map_err(|e| e.to_string())?;
+    let rows = batch.num_rows();
+    if rows == 0 || rows > cursor.max_batch_size {
+        return Err(format!(
+            "{fn_name}: Arrow returned {rows} rows, expected 1..={}",
+            cursor.max_batch_size
+        ));
+    }
+    Ok(Some((cursor, batch, rows)))
+}
+
 /// Writes `value` through a nullable out-parameter.
 unsafe fn write_out(ptr: *mut i64, value: i64) {
     if !ptr.is_null() {
@@ -1035,26 +1080,11 @@ pub unsafe extern "C" fn parquet_df_next_batch(
 ) -> i64 {
     static FN: &str = "parquet_df_next_batch";
     let cursor = cursor_for(handle, FN).map_err(|e| e.to_string())?;
-    let mut cursor = cursor.lock();
-    check_borrowable_shape(&cursor, FN)?;
-
-    // Released here rather than on success, so no early return below leaves buffers held. Java
-    // clears its resident batch before calling. The reservation follows the batch.
-    cursor.borrowed_batch = None;
-    cursor.reservation.resize(0);
-
-    if at_eof(&cursor, target_row, FN).map_err(|e| e.to_string())? {
-        return Ok(RC_EOF); // target is past the last row (e.g. a scan running off the end)
-    }
-
-    let batch = cursor.next_batch(target_row).map_err(|e| e.to_string())?;
-    let rows = batch.num_rows();
-    if rows == 0 || rows > cursor.max_batch_size {
-        return Err(format!(
-            "{FN}: Arrow returned {rows} rows, expected 1..={}",
-            cursor.max_batch_size
-        ));
-    }
+    let (mut cursor, batch, rows) =
+        match prepare_batch(&cursor, target_row, FN, check_borrowable_shape)? {
+            Some(prepared) => prepared,
+            None => return Ok(RC_EOF), // target is past the last row (e.g. a scan running off the end)
+        };
 
     // Scoped so the borrow ends before `batch` moves onto the cursor; `BorrowedBuffers` holds
     // plain addresses.
@@ -1209,25 +1239,11 @@ pub unsafe extern "C" fn parquet_df_next_list_batch(
 ) -> i64 {
     static FN: &str = "parquet_df_next_list_batch";
     let cursor = cursor_for(handle, FN).map_err(|e| e.to_string())?;
-    let mut cursor = cursor.lock();
-
-    // Released here rather than on success, so no early return below leaves buffers held. Java
-    // clears its resident batch before calling. The reservation follows the batch.
-    cursor.borrowed_batch = None;
-    cursor.reservation.resize(0);
-
-    if at_eof(&cursor, target_row, FN).map_err(|e| e.to_string())? {
-        return Ok(RC_EOF); // target is past the last row (e.g. a scan running off the end)
-    }
-
-    let batch = cursor.next_batch(target_row).map_err(|e| e.to_string())?;
-    let rows = batch.num_rows();
-    if rows == 0 || rows > cursor.max_batch_size {
-        return Err(format!(
-            "{FN}: Arrow returned {rows} rows, expected 1..={}",
-            cursor.max_batch_size
-        ));
-    }
+    let (mut cursor, batch, rows) = match prepare_batch(&cursor, target_row, FN, check_list_shape)?
+    {
+        Some(prepared) => prepared,
+        None => return Ok(RC_EOF), // target is past the last row (e.g. a scan running off the end)
+    };
 
     // Scoped so the borrow ends before `batch` moves onto the cursor.
     let borrow = {
