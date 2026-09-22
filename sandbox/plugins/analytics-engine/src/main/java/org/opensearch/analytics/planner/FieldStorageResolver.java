@@ -57,10 +57,14 @@ public class FieldStorageResolver {
     @SuppressWarnings("unchecked")
     public FieldStorageResolver(IndexMetadata indexMetadata) {
         String indexName = indexMetadata.getIndex().getName();
-        String primaryFormat = indexMetadata.getSettings().get(PRIMARY_DATA_FORMAT_SETTING, LUCENE_FORMAT);
+        String primaryFormat = indexMetadata.getSettings()
+            .get(PRIMARY_DATA_FORMAT_SETTING, indexMetadata.getSettings().get("archived." + PRIMARY_DATA_FORMAT_SETTING, LUCENE_FORMAT));
         // Lucene is index-viable only when it's the primary or in the secondary list.
-        boolean luceneAvailable = LUCENE_FORMAT.equals(primaryFormat)
-            || indexMetadata.getSettings().getAsList(SECONDARY_DATA_FORMATS_SETTING).contains(LUCENE_FORMAT);
+        List<String> secondaryList = indexMetadata.getSettings().getAsList(SECONDARY_DATA_FORMATS_SETTING);
+        if (secondaryList.isEmpty()) {
+            secondaryList = indexMetadata.getSettings().getAsList("archived." + SECONDARY_DATA_FORMATS_SETTING);
+        }
+        boolean luceneAvailable = LUCENE_FORMAT.equals(primaryFormat) || secondaryList.contains(LUCENE_FORMAT);
 
         // A mapping-less index (created empty, never written to) declares no fields — it
         // contributes nothing to the field-storage union. Aliases and index patterns legitimately
