@@ -32,10 +32,12 @@ public final class ParquetCodecBridge {
     private static final MethodHandle RESET_CURSOR;
     private static final MethodHandle NEXT_BATCH;
     private static final MethodHandle NEXT_BINARY_BATCH;
+    private static final MethodHandle NEXT_LIST_BATCH;
     private static final MethodHandle FILE_METADATA;
     private static final MethodHandle COLUMN_NON_NULL_COUNT;
     private static final MethodHandle PAGE_COUNT;
     private static final MethodHandle PAGE_INDEX;
+    private static final MethodHandle IS_REPEATED;
 
     /**
      * Value of {@link FileMetadata#opensearchFormatVersion} when the footer carries no parseable
@@ -117,6 +119,23 @@ public final class ParquetCodecBridge {
                 ValueLayout.JAVA_LONG   // out_presence_bits_cap
             )
         );
+        NEXT_LIST_BATCH = linker.downcallHandle(
+            lib.find("parquet_df_next_list_batch").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,  // handle
+                ValueLayout.JAVA_LONG,  // target_row
+                ValueLayout.ADDRESS,    // out_first_row
+                ValueLayout.ADDRESS,    // out_last_row
+                ValueLayout.ADDRESS,    // out_values_addr
+                ValueLayout.ADDRESS,    // out_validity_addr
+                ValueLayout.ADDRESS,    // out_validity_bit_offset
+                ValueLayout.ADDRESS,    // out_value_kind
+                ValueLayout.ADDRESS,    // out_value_bit_offset
+                ValueLayout.ADDRESS,    // out_offsets_addr
+                ValueLayout.ADDRESS     // out_value_count
+            )
+        );
         FILE_METADATA = linker.downcallHandle(
             lib.find("parquet_df_file_metadata").orElseThrow(),
             FunctionDescriptor.of(
@@ -158,6 +177,11 @@ public final class ParquetCodecBridge {
                 ValueLayout.JAVA_LONG,  // out_buf_capacity
                 ValueLayout.ADDRESS     // out_actual_pages
             )
+        );
+        // Matches the Rust `parquet_df_is_repeated(handle: i64) -> i64`.
+        IS_REPEATED = linker.downcallHandle(
+            lib.find("parquet_df_is_repeated").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG) // handle
         );
     }
 
@@ -280,6 +304,16 @@ public final class ParquetCodecBridge {
     }
 
     /**
+     * Whether the cursor's projected column is physically repeated (a Parquet LIST); see
+     * {@link ParquetColumnReader#isPhysicallyRepeated()}. A {@code < 0} native return becomes an {@link IOException}.
+     */
+    public static boolean isRepeated(long handle) throws IOException {
+        try (var call = new NativeCall()) {
+            return call.invokeIO(IS_REPEATED, handle) == 1L;
+        }
+    }
+
+    /**
      * Advances the cursor to the batch containing {@code targetRow}, writing the batch row range,
      * the borrowed Arrow value and validity buffer addresses, the validity bit offset, the value
      * KIND, and the value bit offset into the caller-owned out-parameters. Returns {@link #RC_OK}
@@ -350,6 +384,43 @@ public final class ParquetCodecBridge {
                 outByteOffsetsCap,
                 outPresenceBits,
                 outPresenceBitsCap
+            );
+        }
+    }
+
+    /**
+     * List-aware sibling of {@link #nextBatch} for repeated columns: writes the same row range and
+     * flat value/validity buffers, plus the {@code i32} offsets buffer and child value count. Row
+     * {@code r}'s values are {@code offsets[r]..offsets[r + 1]}. A distinct native symbol because
+     * {@link #nextBatch}'s ABI is depended on by the shipped single-valued read path.
+     */
+    public static long nextListBatch(
+        long handle,
+        long targetRow,
+        MemorySegment outFirstRow,
+        MemorySegment outLastRow,
+        MemorySegment outValuesAddr,
+        MemorySegment outValidityAddr,
+        MemorySegment outValidityBitOffset,
+        MemorySegment outValueKind,
+        MemorySegment outValueBitOffset,
+        MemorySegment outOffsetsAddr,
+        MemorySegment outValueCount
+    ) throws IOException {
+        try (var call = new NativeCall()) {
+            return call.invokeIO(
+                NEXT_LIST_BATCH,
+                handle,
+                targetRow,
+                outFirstRow,
+                outLastRow,
+                outValuesAddr,
+                outValidityAddr,
+                outValidityBitOffset,
+                outValueKind,
+                outValueBitOffset,
+                outOffsetsAddr,
+                outValueCount
             );
         }
     }

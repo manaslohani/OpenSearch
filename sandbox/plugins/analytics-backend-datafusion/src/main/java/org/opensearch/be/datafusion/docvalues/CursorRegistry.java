@@ -9,6 +9,7 @@
 package org.opensearch.be.datafusion.docvalues;
 
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetColumnReader;
+import org.opensearch.be.datafusion.docvalues.bridge.ParquetListColumnReader;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -28,6 +29,8 @@ import java.util.List;
 final class CursorRegistry implements Closeable {
 
     private final List<ParquetColumnReader> cursors = Collections.synchronizedList(new ArrayList<>());
+    // A distinct list because ParquetListColumnReader is a different type and cannot go into List<ParquetColumnReader>.
+    private final List<ParquetListColumnReader> listCursors = Collections.synchronizedList(new ArrayList<>());
 
     /**
      * Records a cursor this request opened; it is closed by {@link #close()} at request end. Every
@@ -36,6 +39,11 @@ final class CursorRegistry implements Closeable {
      */
     void register(ParquetColumnReader cursor) {
         cursors.add(cursor);
+    }
+
+    /** Records a list cursor this request opened; released by {@link #close()} like scalar cursors. */
+    void register(ParquetListColumnReader cursor) {
+        listCursors.add(cursor);
     }
 
     @Override
@@ -47,12 +55,26 @@ final class CursorRegistry implements Closeable {
             }
             cursors.clear();
         }
+        synchronized (listCursors) {
+            for (ParquetListColumnReader cursor : listCursors) {
+                // Same idempotent NativeHandle teardown as scalar cursors.
+                cursor.close();
+            }
+            listCursors.clear();
+        }
     }
 
     /** Cursors opened on this request (tests). */
     List<ParquetColumnReader> opened() {
         synchronized (cursors) {
             return List.copyOf(cursors);
+        }
+    }
+
+    /** List cursors opened on this request (tests). */
+    List<ParquetListColumnReader> listOpened() {
+        synchronized (listCursors) {
+            return List.copyOf(listCursors);
         }
     }
 }

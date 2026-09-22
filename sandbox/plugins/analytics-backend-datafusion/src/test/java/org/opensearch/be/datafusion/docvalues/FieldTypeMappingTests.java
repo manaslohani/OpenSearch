@@ -93,6 +93,33 @@ public class FieldTypeMappingTests extends OpenSearchTestCase {
     }
 
     /**
+     * Every supported mapping type resolves to SORTED_NUMERIC, and the requested-type guard rejects
+     * any other requested DocValues type for those mappings.
+     */
+    public void testEverySupportedTypeResolvesToSortedNumericAndRejectsOtherRequestedDvTypes() {
+        for (String type : new String[] {
+            "byte",
+            "short",
+            "integer",
+            "long",
+            "float",
+            "double",
+            "date",
+            "date_nanos",
+            "boolean",
+            "unsigned_long",
+            "scaled_float",
+            "half_float" }) {
+            assertEquals(type + " must resolve to SORTED_NUMERIC", DocValuesType.SORTED_NUMERIC, FieldTypeMapping.forType(type));
+            // The requested-type guard admits only SORTED_NUMERIC; NUMERIC and every other DV type
+            // must be rejected for an otherwise-supported mapping type.
+            FieldTypeMapping.validate(type + "_field", type, DocValuesType.SORTED_NUMERIC);
+            expectThrows(IllegalArgumentException.class, () -> FieldTypeMapping.validate(type + "_field", type, DocValuesType.NUMERIC));
+            expectThrows(IllegalArgumentException.class, () -> FieldTypeMapping.validate(type + "_field", type, DocValuesType.SORTED_SET));
+        }
+    }
+
+    /**
      * {@code validate} is the gate {@code ParquetDocValuesProducer.getSortedNumeric}
      * actually calls, once the field's {@code MappedFieldType} is known, so it is what keeps an
      * unsupported type from ever reaching the native cursor.
