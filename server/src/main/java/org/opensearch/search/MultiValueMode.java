@@ -507,7 +507,8 @@ public enum MultiValueMode implements Writeable {
         protected long pick(SortedNumericUnsignedLongValues values) throws IOException {
             final int count = values.docValueCount();
             final long min = values.nextValue();
-            if (count == 1 || min > 0) {
+            // Signed-ascending storage puts unsigned values >= 2^63 first, so a non-negative first value is the min.
+            if (count == 1 || min >= 0) {
                 return min;
             }
             for (int i = 1; i < count; ++i) {

@@ -33,17 +33,21 @@ package org.opensearch.search.aggregations.metrics;
 
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.PointValues;
+import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.search.CollectionTerminatedException;
 import org.apache.lucene.search.DocIdStream;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.NumericUtils;
+import org.opensearch.common.Numbers;
 import org.opensearch.common.lease.Releasables;
 import org.opensearch.common.util.BigArrays;
 import org.opensearch.common.util.DoubleArray;
 import org.opensearch.index.codec.composite.CompositeIndexFieldInfo;
 import org.opensearch.index.compositeindex.datacube.MetricStat;
+import org.opensearch.index.fielddata.LongToSortedNumericUnsignedLongValues;
 import org.opensearch.index.fielddata.NumericDoubleValues;
 import org.opensearch.index.fielddata.SortedNumericDoubleValues;
 import org.opensearch.search.DocValueFormat;
@@ -152,9 +156,30 @@ class MaxAggregator extends NumericMetricsAggregator.SingleValue implements Star
         }
 
         final BigArrays bigArrays = context.bigArrays();
-        final SortedNumericDoubleValues allValues = valuesSource.doubleValues(ctx);
-        final NumericDoubleValues values = MultiValueMode.MAX.select(allValues);
-        return new LeafBucketCollectorBase(sub, allValues) {
+        final NumericDoubleValues values;
+        final Object scorerSource;
+        if (valuesSource.isBigInteger()) {
+            // unsigned_long values are stored as signed longs; pick the extreme by unsigned order, then convert.
+            final SortedNumericDocValues rawValues = valuesSource.longValues(ctx);
+            final NumericDocValues selected = MultiValueMode.MAX.select(new LongToSortedNumericUnsignedLongValues(rawValues));
+            values = new NumericDoubleValues() {
+                @Override
+                public boolean advanceExact(int doc) throws IOException {
+                    return selected.advanceExact(doc);
+                }
+
+                @Override
+                public double doubleValue() throws IOException {
+                    return Numbers.unsignedLongToDouble(selected.longValue());
+                }
+            };
+            scorerSource = rawValues;
+        } else {
+            final SortedNumericDoubleValues allValues = valuesSource.doubleValues(ctx);
+            values = MultiValueMode.MAX.select(allValues);
+            scorerSource = allValues;
+        }
+        return new LeafBucketCollectorBase(sub, scorerSource) {
             @Override
             public void collect(int doc, long bucket) throws IOException {
                 growMaxes(bucket);

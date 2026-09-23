@@ -114,7 +114,6 @@ setup:
   - match: { aggregations.the_unsigned_min.value: 51.0 }
   - match: { aggregations.the_double_min.value: 51.0 }
 
-
 ---
 "Missing field with missing param":
 
@@ -166,3 +165,66 @@ setup:
   - length: { hits.hits: 4 }
   - match: { aggregations.the_unsigned_min.value: 1.0 }
   - match: { aggregations.the_unsigned_min.meta.foo: "bar" }
+
+---
+"Multi-valued unsigned_long straddling 2^63":
+
+  - do:
+      indices.create:
+          index: test_mv
+          body:
+            settings:
+              number_of_replicas: 0
+            mappings:
+              properties:
+                unsigned_field:
+                   type : unsigned_long
+
+  - do:
+       bulk:
+         refresh: true
+         body:
+           - index:
+               _index: test_mv
+               _id:    1
+           - unsigned_field: ["18446744073709551615", 3]
+           - index:
+               _index: test_mv
+               _id:    2
+           - unsigned_field: [10, 100]
+
+  # Unfiltered: a match_all query enables the BKD point-index fast path.
+  - do:
+      search:
+        index: test_mv
+        rest_total_hits_as_int: true
+        body:
+          size: 0
+          aggs:
+            the_unsigned_min:
+              min:
+                field: unsigned_field
+
+  - match: { hits.total: 2 }
+  - match: { aggregations.the_unsigned_min.value: 3.0 }
+
+  # Filtered: skips the point fast path, forcing the doc-values MultiValueMode path.
+  - do:
+      search:
+        index: test_mv
+        rest_total_hits_as_int: true
+        body:
+          size: 0
+          query:
+            constant_score:
+              filter:
+                range:
+                  unsigned_field:
+                    gte: 1
+          aggs:
+            the_unsigned_min:
+              min:
+                field: unsigned_field
+
+  - match: { hits.total: 2 }
+  - match: { aggregations.the_unsigned_min.value: 3.0 }
