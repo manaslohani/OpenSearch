@@ -30,9 +30,9 @@ final class CursorRegistry implements Closeable {
     private final List<ParquetColumnReader> cursors = Collections.synchronizedList(new ArrayList<>());
 
     /**
-     * Records a cursor this request opened; it is closed by {@link #close()} at request end. Every
-     * accessor call on this request's leaf readers completes before the searcher closes, so no cursor
-     * is registered after {@link #close()}.
+     * Records a cursor this request opened; it is closed by {@link #close()} at request end. Cursors
+     * are opened during doc-values reads, and every read on this request's leaf readers completes
+     * before the searcher closes, so no cursor is registered after {@link #close()}.
      */
     void register(ParquetColumnReader cursor) {
         cursors.add(cursor);

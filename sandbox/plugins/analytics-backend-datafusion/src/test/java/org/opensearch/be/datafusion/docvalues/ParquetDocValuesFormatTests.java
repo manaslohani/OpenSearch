@@ -503,7 +503,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, 0);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             for (int doc = 0; doc < ROWS; doc++) {
                 assertTrue("row " + doc + " should be present", dv.advanceExact(doc));
                 assertEquals("value at row " + doc, LongColumnFixture.valueAt(doc), dv.longValue());
@@ -517,7 +517,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, NULL_EVERY);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             for (int doc = 0; doc < ROWS; doc++) {
                 boolean present = dv.advanceExact(doc);
                 if (doc % NULL_EVERY == 0) {
@@ -535,7 +535,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, NULL_EVERY);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             // Row 0 is null, so the first live doc is 1.
             assertEquals(1, dv.nextDoc());
             assertEquals(LongColumnFixture.valueAt(1), dv.longValue());
@@ -554,7 +554,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, 1);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             assertEquals(DocIdSetIterator.NO_MORE_DOCS, dv.advance(0));
             assertEquals(DocIdSetIterator.NO_MORE_DOCS, dv.docID());
         }
@@ -565,7 +565,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, 0);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             assertTrue(dv.advanceExact(250));
             assertEquals(LongColumnFixture.valueAt(250), dv.longValue());
             // A lower target than the current batch forces the forward-only cursor to reopen.
@@ -580,7 +580,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, 0);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             int target = randomIntBetween(0, 5);
             while (target < ROWS) {
                 int expected = nextPresent(target, ROWS, 0);
@@ -598,7 +598,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, NULL_EVERY);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             int target = randomIntBetween(0, 5);
             while (target < ROWS) {
                 int expected = nextPresent(target, ROWS, NULL_EVERY);
@@ -616,7 +616,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, 0);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN, FIXED_WINDOW, FIXED_WINDOW)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             int doc = -1;
             while (true) {
                 // A gap wider than the fixed window guarantees the target is in a later batch.
@@ -632,7 +632,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
 
         // A single jump from the start to the last doc crosses many fixed-size batches.
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN, FIXED_WINDOW, FIXED_WINDOW)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             assertEquals(ROWS - 1, dv.advance(ROWS - 1));
             assertEquals(LongColumnFixture.valueAt(ROWS - 1), dv.longValue());
             assertEquals(DocIdSetIterator.NO_MORE_DOCS, dv.advance(ROWS));
@@ -646,7 +646,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, 0);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             int doc = randomIntBetween(0, ROWS - 1);
             long expected = LongColumnFixture.valueAt(doc);
             int repeats = randomIntBetween(2, 5);
@@ -663,7 +663,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, 0);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             assertEquals(DocIdSetIterator.NO_MORE_DOCS, dv.advance(ROWS));
             assertEquals(DocIdSetIterator.NO_MORE_DOCS, dv.docID());
             assertEquals(DocIdSetIterator.NO_MORE_DOCS, dv.advance(randomIntBetween(ROWS, ROWS * 4)));
@@ -677,7 +677,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, 0);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             for (int doc = 0; doc < ROWS; doc++) {
                 assertEquals(doc, dv.nextDoc());
                 assertEquals(LongColumnFixture.valueAt(doc), dv.longValue());
@@ -692,7 +692,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, NULL_EVERY);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             int expected = nextPresent(0, ROWS, NULL_EVERY);
             while (expected != DocIdSetIterator.NO_MORE_DOCS) {
                 assertEquals(expected, dv.nextDoc());
@@ -712,7 +712,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         int nullRow = firstNullAtBatchEnd(NULL_EVERY, FIXED_WINDOW, ROWS);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN, FIXED_WINDOW, FIXED_WINDOW)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             // Walk from the start so the resident batch is [0, W-1] and nullRow is its last row, not a seek-aligned first row.
             assertEquals(nextPresent(0, ROWS, NULL_EVERY), dv.advance(0));
             assertEquals("nullRow must be the resident batch's last row", nullRow, (int) reader.decodedBatch().lastRow());
@@ -733,7 +733,7 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         LongColumnFixture.write(file, allocator, COLUMN, ROWS, NULL_EVERY);
 
         try (ParquetColumnReader reader = ParquetColumnReader.open(file, COLUMN)) {
-            ParquetNumericDocValues dv = new ParquetNumericDocValues(reader, ROWS);
+            ParquetNumericDocValues dv = new ParquetNumericDocValues(() -> reader, ROWS);
             int doc = 0;
             int probes = randomIntBetween(5, 15);
             for (int i = 0; i < probes; i++) {
@@ -754,8 +754,9 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
     // ------------------------------------------------------------------------------------------------
 
     /**
-     * Every accessor call hands out a fresh cursor (dedicated per consumer), and closing the request's
-     * registry closes exactly those cursors and leaves the shared producer open. Close is idempotent.
+     * Cursors open on first read, not at the accessor call; each iterator gets its own dedicated
+     * cursor, and closing the request's registry closes exactly those cursors and leaves the shared
+     * producer open. Close is idempotent.
      */
     public void testRequestEndClosesOnlyItsCursorsNotTheProducer() throws Exception {
         int rows = 200;
@@ -767,16 +768,20 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
 
         CursorRegistry request = new CursorRegistry();
         SortedNumericDocValues first = producer.getSortedNumeric(fi, request);
-        producer.getSortedNumeric(fi, request);
+        SortedNumericDocValues second = producer.getSortedNumeric(fi, request);
+        assertTrue("no cursor opens before the first read", request.opened().isEmpty());
+
+        // The first read on each iterator opens its cursor and reads real values off the fixture.
+        NumericDocValues firstSingle = DocValues.unwrapSingleton(first);
+        assertTrue(firstSingle.advanceExact(10));
+        assertEquals(LongColumnFixture.valueAt(10), firstSingle.longValue());
+        NumericDocValues secondSingle = DocValues.unwrapSingleton(second);
+        assertTrue(secondSingle.advanceExact(20));
+        assertEquals(LongColumnFixture.valueAt(20), secondSingle.longValue());
 
         List<ParquetColumnReader> opened = request.opened();
-        assertEquals("each accessor call opens its own cursor", 2, opened.size());
+        assertEquals("each iterator opens its own cursor on first read", 2, opened.size());
         assertNotSame("cursors must be dedicated per consumer", opened.get(0), opened.get(1));
-
-        // The cursor reads real values off the fixture before the request ends.
-        NumericDocValues single = DocValues.unwrapSingleton(first);
-        assertTrue(single.advanceExact(10));
-        assertEquals(LongColumnFixture.valueAt(10), single.longValue());
 
         for (ParquetColumnReader cursor : opened) {
             assertFalse("cursor must be open mid-request", cursor.isClosed());
@@ -805,11 +810,13 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         FieldInfo fi = sortedNumericField(COLUMN);
 
         CursorRegistry firstRequest = new CursorRegistry();
-        producer.getSortedNumeric(fi, firstRequest);
+        NumericDocValues firstDv = DocValues.unwrapSingleton(producer.getSortedNumeric(fi, firstRequest));
+        assertTrue(firstDv.advanceExact(0)); // first read opens the cursor
         ParquetColumnReader firstCursor = firstRequest.opened().get(0);
 
         CursorRegistry secondRequest = new CursorRegistry();
-        producer.getSortedNumeric(fi, secondRequest);
+        NumericDocValues secondDv = DocValues.unwrapSingleton(producer.getSortedNumeric(fi, secondRequest));
+        assertTrue(secondDv.advanceExact(0)); // first read opens the cursor
         ParquetColumnReader secondCursor = secondRequest.opened().get(0);
 
         assertNotSame("sequential requests must not share a cursor", firstCursor, secondCursor);
@@ -879,8 +886,8 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
     }
 
     /**
-     * A cursor whose open fails leaves the registry holding exactly the cursors opened before it, and
-     * the request still closes those at its end.
+     * A cursor whose open fails on first read leaves the registry holding exactly the cursors opened
+     * before it, and the request still closes those at its end.
      */
     public void testFailedCursorOpenLeavesEarlierCursorsRegisteredAndClosable() throws Exception {
         int rows = 200;
@@ -890,13 +897,14 @@ public class ParquetDocValuesFormatTests extends DataFusionBackedTestCase {
         ParquetDocValuesProducer producer = new ParquetDocValuesProducer(file, ParquetColumnReader.LOCAL_STORE, Settings.EMPTY, rows, null);
 
         CursorRegistry request = new CursorRegistry();
-        producer.getSortedNumeric(sortedNumericField(COLUMN), request);
+        NumericDocValues good = DocValues.unwrapSingleton(producer.getSortedNumeric(sortedNumericField(COLUMN), request));
+        assertTrue(good.advanceExact(0)); // first read opens the good field's cursor
         List<ParquetColumnReader> afterGood = request.opened();
         assertEquals("the good field opens one cursor", 1, afterGood.size());
 
-        // The column is absent from the file, so ParquetColumnReader.open throws before registering.
-        FieldInfo missing = sortedNumericField("no_such_column");
-        expectThrows(IOException.class, () -> producer.getSortedNumeric(missing, request));
+        // The column is absent from the file, so the lazy open throws on the first read, before registering.
+        NumericDocValues missing = DocValues.unwrapSingleton(producer.getSortedNumeric(sortedNumericField("no_such_column"), request));
+        expectThrows(IOException.class, () -> missing.advanceExact(0));
 
         List<ParquetColumnReader> afterFailure = request.opened();
         assertEquals("a failed open registers no cursor", 1, afterFailure.size());

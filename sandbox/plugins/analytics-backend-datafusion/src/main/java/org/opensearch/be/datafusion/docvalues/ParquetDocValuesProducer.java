@@ -42,12 +42,12 @@ import java.util.Locale;
  *
  * <p>One producer is cached per segment core by {@link ParquetSegmentResourceCache} and shared
  * across requests; it is closed by the core's closed-listener, not per request. Each
- * {@link #getSortedNumeric(FieldInfo, CursorRegistry)} opens its own dedicated
- * {@link ParquetColumnReader}: a native cursor is forward-only, so one shared across concurrent
- * segment-search slices would be driven backwards by one slice while another advances it. A reader
- * per iterator keeps each slice's scan independent, and the cursor's lifetime belongs to the calling
- * request's {@link CursorRegistry} - the accessor API carries no request identity, so the producer
- * cannot own it.
+ * {@link #getSortedNumeric(FieldInfo, CursorRegistry)} serves its iterator over a dedicated
+ * {@link ParquetColumnReader}, opened lazily on the iterator's first read: a native cursor is
+ * forward-only, so one shared across concurrent segment-search slices would be driven backwards by
+ * one slice while another advances it. A reader per iterator keeps each slice's scan independent,
+ * and the cursor's lifetime belongs to the calling request's {@link CursorRegistry} - the accessor
+ * API carries no request identity, so the producer cannot own it.
  */
 public final class ParquetDocValuesProducer extends DocValuesProducer {
 
@@ -154,8 +154,10 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     }
 
     /**
-     * Serves {@code field} as a singleton over a dedicated forward-only cursor, recorded on
-     * {@code cursors} so the calling request closes it when it ends.
+     * Serves {@code field} as a singleton whose backing forward-only cursor is opened on first read
+     * and recorded on {@code cursors}, so the calling request closes it when it ends. An iterator
+     * that is never advanced (aggregation setup over a segment where no document matches) opens no
+     * cursor.
      *
      * <p>Ingest rejects multi-valued numerics (ParquetDocumentInput), so every numeric column on disk
      * is single-valued and this singleton wrap is exact; OpenSearch value sources recover the inner
@@ -164,7 +166,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     // TODO(multi-value): no repeated read path; the write path emits single values only.
     SortedNumericDocValues getSortedNumeric(FieldInfo field, CursorRegistry cursors) throws IOException {
         validate(field, DocValuesType.SORTED_NUMERIC);
-        return DocValues.singleton(new ParquetNumericDocValues(openCursor(field.getName(), cursors), maxDoc));
+        return DocValues.singleton(new ParquetNumericDocValues(() -> openCursor(field.getName(), cursors), maxDoc));
     }
 
     @Override

@@ -11,6 +11,7 @@ package org.opensearch.be.datafusion.docvalues.iter;
 import org.apache.lucene.index.NumericDocValues;
 import org.opensearch.be.datafusion.docvalues.bridge.DecodedBatch;
 import org.opensearch.be.datafusion.docvalues.bridge.NumericValueReader;
+import org.opensearch.common.CheckedSupplier;
 
 import java.io.IOException;
 
@@ -22,19 +23,33 @@ import java.io.IOException;
  * {@link NumericValueReader#loadBatchContaining} decodes the batch that holds it (the only step that
  * crosses the native boundary). Float and double values are decoded as their raw IEEE-754 bits, so
  * {@link #longValue()} returns the Lucene-encoded form directly.
+ *
+ * <p>The backing reader is opened lazily on the first read: aggregation setup requests doc values on
+ * every segment before knowing whether any document there matches, so an iterator that is never
+ * advanced must not pay the native cursor open.
  */
 public final class ParquetNumericDocValues extends NumericDocValues {
 
-    private final NumericValueReader reader;
+    private final CheckedSupplier<NumericValueReader, IOException> opener;
     private final int maxDoc;
 
+    private NumericValueReader reader;
     private int doc = -1;
     private long currentValue;
 
-    /** Creates a view over {@code reader}'s single-valued numeric column, bounded by {@code maxDoc}. */
-    public ParquetNumericDocValues(NumericValueReader reader, int maxDoc) {
-        this.reader = reader;
+    public ParquetNumericDocValues(CheckedSupplier<NumericValueReader, IOException> opener, int maxDoc) {
+        this.opener = opener;
         this.maxDoc = maxDoc;
+    }
+
+    /** The backing reader, opened on first use. */
+    private NumericValueReader reader() throws IOException {
+        NumericValueReader r = reader;
+        if (r == null) {
+            r = opener.get();
+            reader = r;
+        }
+        return r;
     }
 
     @Override
@@ -44,6 +59,7 @@ public final class ParquetNumericDocValues extends NumericDocValues {
             return false;
         }
         doc = target;
+        NumericValueReader reader = reader();
         DecodedBatch batch = reader.decodedBatch();
         if (batch == null || batch.contains(target) == false) {
             reader.loadBatchContaining(target);
@@ -74,6 +90,7 @@ public final class ParquetNumericDocValues extends NumericDocValues {
 
     @Override
     public int advance(int target) throws IOException {
+        NumericValueReader reader = reader();
         int d = target;
         while (d < maxDoc) {
             DecodedBatch batch = reader.decodedBatch();
