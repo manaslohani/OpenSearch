@@ -1448,22 +1448,23 @@ public class DataFormatAwareEngineTests extends OpenSearchTestCase {
     }
 
     /**
-     * With only the default mock format (named {@code composite}, exposing no Lucene
-     * DirectoryReader), {@code acquireSearcherSupplier} must fail loudly instead of returning an
-     * unsearchable supplier: the shared support cannot resolve the {@code lucene} data format and
-     * wraps the failure in an {@link EngineException}. The failure path must also release the
-     * acquired reader/snapshot reference — verified implicitly by the leak checks in tear-down.
+     * With only the default mock format (named {@code composite}, exposing no searchable
+     * DirectoryReader provider), {@code acquireSearcherSupplier} must fail loudly instead of returning
+     * an unsearchable supplier: the shared support finds no format whose reader is a
+     * {@link SearchableDirectoryReaderProvider} and throws {@link IllegalStateException}. The failure
+     * path must also release the acquired reader/snapshot reference — verified implicitly by the leak
+     * checks in tear-down.
      */
     public void testAcquireSearcherSupplierFailsWithoutSearchableLuceneReader() throws IOException {
         try (DataFormatAwareEngine engine = createDFAEngine(store, createTempDir())) {
             engine.index(indexOp(createParsedDocWithInput("1", null)));
             engine.refresh("test");
 
-            EngineException e = expectThrows(
-                EngineException.class,
+            IllegalStateException e = expectThrows(
+                IllegalStateException.class,
                 () -> engine.acquireSearcherSupplier(Function.identity(), Engine.SearcherScope.EXTERNAL)
             );
-            assertThat(e.getMessage(), containsString("failed to build searcher supplier"));
+            assertThat(e.getMessage(), containsString("No searchable reader"));
         }
     }
 
@@ -1605,21 +1606,21 @@ public class DataFormatAwareEngineTests extends OpenSearchTestCase {
             }
             engine.refresh("test");
 
-            // At server scope no real Lucene data format is registered, so the pinned contract is the
-            // failure shape: a live engine surfaces the missing format as EngineException (never a raw
-            // NPE or a silent null). The happy path is covered by the composite-engine cluster ITs.
-            EngineException e = expectThrows(
-                EngineException.class,
+            // At server scope no searchable data format is registered, so the pinned contract is the
+            // failure shape: a live engine surfaces the missing searchable reader as IllegalStateException
+            // (never a raw NPE or a silent null). The happy path is covered by the composite-engine cluster ITs.
+            IllegalStateException e = expectThrows(
+                IllegalStateException.class,
                 () -> engine.acquireSearcherSupplier(Function.identity(), Engine.SearcherScope.EXTERNAL)
             );
-            assertThat(e.getMessage(), containsString("failed to build searcher supplier"));
+            assertThat(e.getMessage(), containsString("No searchable reader"));
 
             // The Indexer default acquireSearcher delegates to the supplier, so it must surface the same failure.
-            EngineException viaDefault = expectThrows(
-                EngineException.class,
+            IllegalStateException viaDefault = expectThrows(
+                IllegalStateException.class,
                 () -> engine.acquireSearcher("test", Engine.SearcherScope.EXTERNAL, Function.identity())
             );
-            assertThat(viaDefault.getMessage(), containsString("failed to build searcher supplier"));
+            assertThat(viaDefault.getMessage(), containsString("No searchable reader"));
         } finally {
             engine.close();
         }

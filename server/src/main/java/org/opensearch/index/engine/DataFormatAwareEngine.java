@@ -2325,9 +2325,8 @@ public class DataFormatAwareEngine implements Indexer {
     }
 
     /**
-     * Builds a point-in-time {@link Engine.SearcherSupplier} over this composite shard's Lucene reader,
-     * with each segment bound to the Parquet file backing its doc values. Shared with
-     * {@link DataFormatAwareReadOnlyEngine} so a warm shard binds identically.
+     * Builds a point-in-time {@link Engine.SearcherSupplier} over this composite shard's reader. Shared with
+     * {@link DataFormatAwareReadOnlyEngine} so a warm shard builds its searcher identically.
      */
     @Override
     public Engine.SearcherSupplier acquireSearcherSupplier(Function<Engine.Searcher, Engine.Searcher> wrapper, Engine.SearcherScope scope) {
@@ -2338,7 +2337,7 @@ public class DataFormatAwareEngine implements Indexer {
         } catch (IOException e) {
             throw new EngineException(shardId, "failed to acquire reader for searcher", e);
         }
-        return DataFormatAwareSearcherSupport.acquireSearcherSupplier(shardId, engineConfig, store, readerRef, wrapper, logger);
+        return DataFormatAwareSearcherSupport.acquireSearcherSupplier(shardId, engineConfig, readerRef, wrapper, logger);
     }
 
     @Override

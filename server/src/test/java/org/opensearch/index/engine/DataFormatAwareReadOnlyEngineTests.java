@@ -992,21 +992,21 @@ public class DataFormatAwareReadOnlyEngineTests extends OpenSearchTestCase {
     public void testAcquireSearcherSupplierContract() throws IOException {
         DataFormatAwareReadOnlyEngine engine = createReadOnlyEngine();
         try {
-            // At server scope no real Lucene data format is registered, so the pinned contract is the
-            // failure shape: a live engine surfaces the missing format as EngineException (never a raw
-            // NPE or a silent null). The happy warm path is covered by CompositeParquetWarmDocValuesIT.
-            EngineException e = expectThrows(
-                EngineException.class,
+            // At server scope no searchable data format is registered, so the pinned contract is the
+            // failure shape: a live engine surfaces the missing searchable reader as IllegalStateException
+            // (never a raw NPE or a silent null). The happy warm path is covered by CompositeParquetWarmDocValuesIT.
+            IllegalStateException e = expectThrows(
+                IllegalStateException.class,
                 () -> engine.acquireSearcherSupplier(Function.identity(), Engine.SearcherScope.EXTERNAL)
             );
-            assertThat(e.getMessage(), containsString("failed to build searcher supplier"));
+            assertThat(e.getMessage(), containsString("No searchable reader"));
 
             // The Indexer default acquireSearcher delegates to the supplier, so it must surface the same failure.
-            EngineException viaDefault = expectThrows(
-                EngineException.class,
+            IllegalStateException viaDefault = expectThrows(
+                IllegalStateException.class,
                 () -> engine.acquireSearcher("test", Engine.SearcherScope.EXTERNAL, Function.identity())
             );
-            assertThat(viaDefault.getMessage(), containsString("failed to build searcher supplier"));
+            assertThat(viaDefault.getMessage(), containsString("No searchable reader"));
         } finally {
             engine.close();
         }
