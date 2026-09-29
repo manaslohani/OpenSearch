@@ -96,10 +96,7 @@ public class ParquetDocValuesProducerTests extends OpenSearchTestCase {
         assertTrue("mismatch message must name the segment generation", mismatch.getMessage().contains("7"));
 
         // A segment with no stamped generation cannot be cross-checked, so it is rejected.
-        IOException noAttr = expectThrows(
-            IOException.class,
-            () -> ParquetDocValuesProducer.checkWriterGeneration(null, 7L, file, segment)
-        );
+        IOException noAttr = expectThrows(IOException.class, () -> ParquetDocValuesProducer.checkWriterGeneration(null, 7L, file, segment));
         assertTrue(
             "missing-attribute message must name the writer_generation attribute",
             noAttr.getMessage().contains(ParquetSegmentLayout.WRITER_GENERATION_ATTRIBUTE)

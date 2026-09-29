@@ -279,7 +279,17 @@ public final class ParquetCodecBridge {
         MemorySegment outActualPages
     ) throws IOException {
         try (var call = new NativeCall()) {
-            return call.invokeIO(PAGE_INDEX, handle, outFirstRow, outRowCount, outNullCount, outMinLong, outMaxLong, capacity, outActualPages);
+            return call.invokeIO(
+                PAGE_INDEX,
+                handle,
+                outFirstRow,
+                outRowCount,
+                outNullCount,
+                outMinLong,
+                outMaxLong,
+                capacity,
+                outActualPages
+            );
         }
     }
 

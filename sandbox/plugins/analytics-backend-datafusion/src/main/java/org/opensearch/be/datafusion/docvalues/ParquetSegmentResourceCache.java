@@ -146,9 +146,7 @@ public final class ParquetSegmentResourceCache {
             if (dvType == DocValuesType.NONE && storedKind == null) {
                 continue;
             }
-            DocValuesSkipIndexType skipType = dvType == DocValuesType.NONE
-                ? DocValuesSkipIndexType.NONE
-                : skipIndexTypeFor(mft.typeName());
+            DocValuesSkipIndexType skipType = dvType == DocValuesType.NONE ? DocValuesSkipIndexType.NONE : skipIndexTypeFor(mft.typeName());
             FieldInfo synthetic = newDocValuesFieldInfo(name, ++maxNumber, dvType, skipType);
             if (realFi != null) {
                 combined.removeIf(fi -> fi.name.equals(name));
