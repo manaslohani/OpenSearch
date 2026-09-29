@@ -234,12 +234,12 @@ public class ArrowValuesTests extends OpenSearchTestCase {
         }
     }
 
-    public void testToSourceValueBinaryDropped() {
+    public void testToSourceValueBinaryIsBase64() {
         try (VarBinaryVector v = new VarBinaryVector("b", allocator)) {
             v.allocateNew();
             v.setSafe(0, new byte[] { 1, 2, 3 });
             v.setValueCount(1);
-            assertNull(ArrowValues.toSourceValue(v, 0));
+            assertEquals("AQID", ArrowValues.toSourceValue(v, 0));
         }
     }
 

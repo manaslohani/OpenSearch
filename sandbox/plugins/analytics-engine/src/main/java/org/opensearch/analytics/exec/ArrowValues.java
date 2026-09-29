@@ -28,6 +28,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -68,9 +69,10 @@ public final class ArrowValues {
 
     /**
      * Reads an Arrow cell as a JSON-friendly scalar: numerics coerced to
-     * {@code long}/{@code double}, timestamps rendered as ISO-8601 UTC strings, list columns as a
-     * {@code List} of converted elements. Binary and remaining complex (struct/decimal) types are
-     * not yet supported and return {@code null}.
+     * {@code long}/{@code double}, timestamps rendered as ISO-8601 UTC strings, binary rendered as
+     * base64 (what XContent writes for {@code byte[]}, so derived {@code _source} matches the
+     * {@code _search} path), list columns as a {@code List} of converted elements. Remaining
+     * complex (struct/decimal) types are not yet supported and return {@code null}.
      */
     public static Object toSourceValue(FieldVector vec, int idx) {
         if (vec == null || vec.isNull(idx)) return null;
@@ -81,7 +83,8 @@ public final class ArrowValues {
             case LargeBinary:
             case FixedSizeBinary:
             case BinaryView:
-                return null;
+                Object bytes = vec.getObject(idx);
+                return bytes instanceof byte[] b ? Base64.getEncoder().encodeToString(b) : null;
             default:
                 break;
         }
