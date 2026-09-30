@@ -23,6 +23,7 @@ import org.opensearch.be.datafusion.docvalues.bridge.ParquetCodecBridge;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetColumnReader;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetListColumnReader;
 import org.opensearch.be.datafusion.docvalues.iter.BinaryFramingDocValues;
+import org.opensearch.be.datafusion.docvalues.iter.BinaryListFramingDocValues;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetBinaryDocValues;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetNumericDocValues;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetSortedDocValues;
@@ -219,6 +220,13 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
      */
     BinaryDocValues getBinary(FieldInfo field, CursorRegistry cursors) throws IOException {
         validate(field, DocValuesType.BINARY);
+        if (isRepeated(field)) {
+            // A repeated Binary column: one row per document, each holding a list of values. The list
+            // consumer sorts+dedups them and frames them like CustomBinaryDocValuesField, matching a
+            // vanilla multi-valued binary field. Routing is by physical shape, like the numeric path.
+            return new BinaryListFramingDocValues(openListCursor(field.getName(), cursors), maxDoc);
+        }
+        // Scalar column, including a pre-promotion segment of a multi-valued field.
         return new BinaryFramingDocValues(new ParquetBinaryDocValues(openCursor(field.getName(), cursors), maxDoc));
     }
 
@@ -437,7 +445,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     /**
      * Opens a list cursor for one multi-valued iterator, released with the request's {@code cursors}.
      */
-    private ParquetListColumnReader openListCursor(String field, CursorRegistry cursors) throws IOException {
+    ParquetListColumnReader openListCursor(String field, CursorRegistry cursors) throws IOException {
         ParquetListColumnReader reader = ParquetListColumnReader.open(parquetFile, field, indexSettings, storePointer);
         cursors.register(reader);
         return reader;
