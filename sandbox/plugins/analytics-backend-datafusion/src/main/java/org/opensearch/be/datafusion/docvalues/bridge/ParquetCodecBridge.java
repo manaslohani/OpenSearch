@@ -133,7 +133,8 @@ public final class ParquetCodecBridge {
                 ValueLayout.ADDRESS,    // out_value_kind
                 ValueLayout.ADDRESS,    // out_value_bit_offset
                 ValueLayout.ADDRESS,    // out_offsets_addr
-                ValueLayout.ADDRESS     // out_value_count
+                ValueLayout.ADDRESS,    // out_value_count
+                ValueLayout.ADDRESS     // out_child_offsets_addr
             )
         );
         FILE_METADATA = linker.downcallHandle(
@@ -414,9 +415,12 @@ public final class ParquetCodecBridge {
 
     /**
      * List-aware sibling of {@link #nextBatch} for repeated columns: writes the same row range and
-     * flat value/validity buffers, plus the {@code i32} offsets buffer and child value count. Row
-     * {@code r}'s values are {@code offsets[r]..offsets[r + 1]}. A distinct native symbol because
-     * {@link #nextBatch}'s ABI is depended on by the shipped single-valued read path.
+     * flat value/validity buffers, plus the {@code i32} list offsets buffer, the child value count, and
+     * (for a variable-width binary child) the child's own {@code i32} offsets buffer. Row {@code r}'s
+     * child elements are {@code offsets[r]..offsets[r + 1]}; for a binary child, element {@code c}'s bytes
+     * are {@code values[childOffsets[c]..childOffsets[c + 1]]}. {@code outChildOffsets} reports zero for a
+     * fixed-width child. A distinct native symbol because {@link #nextBatch}'s ABI is depended on by the
+     * shipped single-valued read path.
      */
     public static long nextListBatch(
         long handle,
@@ -429,7 +433,8 @@ public final class ParquetCodecBridge {
         MemorySegment outValueKind,
         MemorySegment outValueBitOffset,
         MemorySegment outOffsetsAddr,
-        MemorySegment outValueCount
+        MemorySegment outValueCount,
+        MemorySegment outChildOffsets
     ) throws IOException {
         try (var call = new NativeCall()) {
             return call.invokeIO(
@@ -444,7 +449,8 @@ public final class ParquetCodecBridge {
                 outValueKind,
                 outValueBitOffset,
                 outOffsetsAddr,
-                outValueCount
+                outValueCount,
+                outChildOffsets
             );
         }
     }

@@ -34,7 +34,7 @@ public final class ParquetListColumnReader extends NativeHandle implements ListV
     public static final long LOCAL_STORE = 0L;
 
     /** Number of scalar out-parameters {@code nextListBatch} writes back. */
-    private static final int OUT_PARAM_COUNT = 9;
+    private static final int OUT_PARAM_COUNT = 10;
 
     private final Path file;
     private final String column;
@@ -124,6 +124,7 @@ public final class ParquetListColumnReader extends NativeHandle implements ListV
         int valueBitOffset;
         long offsetsAddr;
         long valueCount;
+        long childOffsetsAddr;
 
         // Drop the resident batch first: a successful native call frees the buffers it borrowed, so
         // no early exit below may leave a DecodedListBatch whose views address freed memory.
@@ -142,6 +143,7 @@ public final class ParquetListColumnReader extends NativeHandle implements ListV
             MemorySegment valueBitOffsetOut = out.asSlice(6L * Long.BYTES, Long.BYTES);
             MemorySegment offsetsAddrOut = out.asSlice(7L * Long.BYTES, Long.BYTES);
             MemorySegment valueCountOut = out.asSlice(8L * Long.BYTES, Long.BYTES);
+            MemorySegment childOffsetsAddrOut = out.asSlice(9L * Long.BYTES, Long.BYTES);
 
             long rc = ParquetCodecBridge.nextListBatch(
                 ptr,
@@ -154,7 +156,8 @@ public final class ParquetListColumnReader extends NativeHandle implements ListV
                 valueKindOut,
                 valueBitOffsetOut,
                 offsetsAddrOut,
-                valueCountOut
+                valueCountOut,
+                childOffsetsAddrOut
             );
             checkStatus(rc, row);
 
@@ -167,6 +170,7 @@ public final class ParquetListColumnReader extends NativeHandle implements ListV
             valueBitOffset = (int) valueBitOffsetOut.get(ValueLayout.JAVA_LONG, 0);
             offsetsAddr = offsetsAddrOut.get(ValueLayout.JAVA_LONG, 0);
             valueCount = valueCountOut.get(ValueLayout.JAVA_LONG, 0);
+            childOffsetsAddr = childOffsetsAddrOut.get(ValueLayout.JAVA_LONG, 0);
         }
 
         // Validate framing before pointing views at the borrowed buffers: reinterpret() is unbounded,
@@ -180,6 +184,11 @@ public final class ParquetListColumnReader extends NativeHandle implements ListV
         }
         if (valueCount < 0 || valueCount > Integer.MAX_VALUE || offsetsAddr == 0 || bitOffset < 0 || valueBitOffset < 0) {
             throw contractViolation(row, "value count " + valueCount + ", offsets address " + offsetsAddr + ", bit offset " + bitOffset);
+        }
+        // A binary child exports its own i32 offsets buffer (child element -> byte range); a fixed-width
+        // child reports zero here. A non-empty binary child without that buffer is a broken contract.
+        if (kind == DecodedBatch.KIND_BINARY && valueCount > 0 && childOffsetsAddr == 0) {
+            throw contractViolation(row, "binary child value count " + valueCount + " with null child offsets address");
         }
         // A non-empty child buffer must have a values address; an all-empty batch (every list empty)
         // legitimately backs zero child values and may hand over a null values pointer.
@@ -198,13 +207,28 @@ public final class ParquetListColumnReader extends NativeHandle implements ListV
         if (lastOffset < 0 || lastOffset > children) {
             throw contractViolation(row, "final offset " + lastOffset + " exceeds value count " + children);
         }
-        DecodedBatch childValues = decodeChildValues(valuesAddr, validityAddr, kind, bitOffset, valueBitOffset, children, row);
+        DecodedBatch childValues = decodeChildValues(
+            valuesAddr,
+            validityAddr,
+            kind,
+            bitOffset,
+            valueBitOffset,
+            childOffsetsAddr,
+            children,
+            row
+        );
         decodedListBatch = new DecodedListBatch(firstRow, lastRow, offsets, childValues);
     }
 
     /**
      * Builds a {@link DecodedBatch} over the flattened child values, addressed from child index 0 so
      * the list offsets index it directly. An empty batch yields an empty view no offset range reads from.
+     *
+     * <p>A binary child ({@link DecodedBatch#KIND_BINARY}) carries its own {@code children + 1} i32
+     * offsets buffer at {@code childOffsetsAddr} (child element {@code c}'s bytes span
+     * {@code values[childOffsets[c] .. childOffsets[c + 1]]}); its {@code values} view spans the
+     * total byte length, not a fixed stride. A fixed-width child sizes {@code values} by element width
+     * and carries no offsets.
      */
     private DecodedBatch decodeChildValues(
         long valuesAddr,
@@ -212,15 +236,34 @@ public final class ParquetListColumnReader extends NativeHandle implements ListV
         int kind,
         int bitOffset,
         int valueBitOffset,
+        long childOffsetsAddr,
         int children,
         long row
     ) throws IOException {
+        boolean binary = kind == DecodedBatch.KIND_BINARY;
         if (children == 0) {
-            // No offsets view: the child buffers are exported as a fixed-width kind; a variable-width
-            // (binary) child would need the child's own i32 offsets exported alongside the list offsets.
+            // An empty child view no offset range reads from. A binary child's offsets are null too:
+            // no row's offset range is non-empty, so bytesAt is never reached.
             return new DecodedBatch(0, -1, MemorySegment.NULL, kind, valueBitOffset, null, null, 0);
         }
-        MemorySegment values = MemorySegment.ofAddress(valuesAddr).reinterpret(valuesByteLength(kind, children, valueBitOffset, row));
+        MemorySegment childOffsets;
+        long valuesBytes;
+        if (binary) {
+            // children + 1 i32 boundaries; the final one bounds the data buffer this view spans.
+            childOffsets = MemorySegment.ofAddress(childOffsetsAddr).reinterpret((long) (children + 1) * Integer.BYTES);
+            int totalBytes = childOffsets.getAtIndex(ValueLayout.JAVA_INT, children);
+            int firstByte = childOffsets.getAtIndex(ValueLayout.JAVA_INT, 0);
+            if (firstByte != 0 || totalBytes < 0) {
+                throw contractViolation(row, "binary child offsets span [" + firstByte + ", " + totalBytes + "]");
+            }
+            valuesBytes = totalBytes;
+        } else {
+            childOffsets = null;
+            valuesBytes = valuesByteLength(kind, children, valueBitOffset, row);
+        }
+        // A binary child can legitimately span zero bytes (every element empty) while backing non-zero
+        // elements, so a null values pointer is only wrong for a non-empty span.
+        MemorySegment values = valuesBytes == 0 ? MemorySegment.NULL : MemorySegment.ofAddress(valuesAddr).reinterpret(valuesBytes);
         MemorySegment presenceBits;
         int presenceBitOffset;
         if (validityAddr == 0) {
@@ -233,7 +276,7 @@ public final class ParquetListColumnReader extends NativeHandle implements ListV
             presenceBits = MemorySegment.ofAddress(validityAddr).reinterpret(presenceBytes);
             presenceBitOffset = bitOffset;
         }
-        return new DecodedBatch(0, children - 1L, values, kind, valueBitOffset, null, presenceBits, presenceBitOffset);
+        return new DecodedBatch(0, children - 1L, values, kind, valueBitOffset, childOffsets, presenceBits, presenceBitOffset);
     }
 
     /**
