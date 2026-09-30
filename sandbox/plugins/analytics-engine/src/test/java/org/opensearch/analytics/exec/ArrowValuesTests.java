@@ -262,6 +262,43 @@ public class ArrowValuesTests extends OpenSearchTestCase {
         }
     }
 
+    /** A multi-valued binary field is a {@code LIST<Binary>} column; each element renders as base64, matching scalar binary. */
+    public void testToSourceValueListOfBinaryIsBase64Array() {
+        Field child = new Field("element", FieldType.nullable(ArrowType.Binary.INSTANCE), null);
+        Field list = new Field("blobs", FieldType.nullable(ArrowType.List.INSTANCE), List.of(child));
+        try (ListVector vector = (ListVector) list.createVector(allocator)) {
+            vector.allocateNew();
+            int start = vector.startNewValue(0);
+            VarBinaryVector data = (VarBinaryVector) vector.getDataVector();
+            data.setSafe(start, new byte[] { 1, 2, 3 });
+            data.setSafe(start + 1, new byte[] { 4, 5 });
+            data.setValueCount(2);
+            vector.endValue(0, 2);
+            vector.setValueCount(1);
+
+            assertEquals(java.util.Arrays.asList("AQID", "BAU="), ArrowValues.toSourceValue(vector, 0));
+        }
+    }
+
+    /** A multi-valued numeric field is a {@code LIST<Int>} column; it renders as an array of longs in ingest order. */
+    public void testToSourceValueListOfIntIsLongArray() {
+        Field child = new Field("element", FieldType.nullable(new ArrowType.Int(32, true)), null);
+        Field list = new Field("nums", FieldType.nullable(ArrowType.List.INSTANCE), List.of(child));
+        try (ListVector vector = (ListVector) list.createVector(allocator)) {
+            vector.allocateNew();
+            int start = vector.startNewValue(0);
+            IntVector data = (IntVector) vector.getDataVector();
+            data.setSafe(start, 7);
+            data.setSafe(start + 1, 2);
+            data.setSafe(start + 2, 7);
+            data.setValueCount(3);
+            vector.endValue(0, 3);
+            vector.setValueCount(1);
+
+            assertEquals(java.util.Arrays.asList(7L, 2L, 7L), ArrowValues.toSourceValue(vector, 0));
+        }
+    }
+
     public void testToSourceValueUtf8AsString() {
         try (VarCharVector v = new VarCharVector("s", allocator)) {
             v.allocateNew();
