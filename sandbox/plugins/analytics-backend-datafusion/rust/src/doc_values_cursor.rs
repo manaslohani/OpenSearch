@@ -1255,9 +1255,13 @@ pub unsafe extern "C" fn parquet_df_next_list_batch(
     out_value_kind: *mut i64,
     out_value_bit_offset: *mut i64,
     // List slots appended after the single-valued ones, so those keep their indices: `out_offsets_addr`
-    // is the `i32` offsets buffer, `out_value_count` the child count.
+    // is the `i32` list offsets buffer, `out_value_count` the child count.
     out_offsets_addr: *mut i64,
     out_value_count: *mut i64,
+    // Variable-width (Binary) child only: the `i32` offsets buffer of the child `BinaryArray` at child
+    // index 0, so child element `c`'s bytes are `values[child_offsets[c]..child_offsets[c + 1]]`. Zero
+    // for a fixed-width child, whose values live wholly in `out_values_addr` at a fixed stride.
+    out_child_offsets_addr: *mut i64,
 ) -> i64 {
     static FN: &str = "parquet_df_next_list_batch";
     let cursor = cursor_for(handle, FN).map_err(|e| e.to_string())?;
@@ -1287,6 +1291,9 @@ pub unsafe extern "C" fn parquet_df_next_list_batch(
     write_out(out_value_bit_offset, borrow.values.value_bit_offset as i64);
     write_out(out_offsets_addr, borrow.offsets_addr as i64);
     write_out(out_value_count, borrow.value_count as i64);
+    // Binary child carries its own i32 offsets buffer; a fixed-width child reports zero here, which is
+    // exactly what `BorrowedBuffers::offsets_addr` already holds for a non-binary kind.
+    write_out(out_child_offsets_addr, borrow.values.offsets_addr as i64);
     cursor.borrowed_batch = Some(batch);
     Ok(RC_OK)
 }
@@ -1425,6 +1432,64 @@ mod tests {
     /// with the tests so the fixture and its assertions cannot drift.
     pub(super) fn list_fixture_row_width(row: usize) -> usize {
         row % 4
+    }
+
+    /// A single-level `list<binary>` column named "value": row `r` holds [`list_fixture_row_width`]`(r)`
+    /// elements. Child value `i` (in global child order) reads back as [`binary_list_child_bytes`]`(i)`.
+    /// Eight pages per row group, matching the numeric list fixture's layout.
+    pub(super) fn parquet_fixture_with_binary_list_page_rows(
+        row_groups: usize,
+        rows_per_page: usize,
+    ) -> Bytes {
+        use arrow::array::GenericListArray;
+        use arrow::buffer::OffsetBuffer;
+        use arrow::datatypes::Field;
+
+        let row_count = row_groups * rows_per_page * 8;
+        let mut child_values: Vec<Vec<u8>> = Vec::new();
+        let mut list_offsets: Vec<i32> = Vec::with_capacity(row_count + 1);
+        list_offsets.push(0);
+        for row in 0..row_count {
+            for _ in 0..list_fixture_row_width(row) {
+                child_values.push(binary_list_child_bytes(child_values.len()));
+            }
+            list_offsets.push(child_values.len() as i32);
+        }
+        let child: BinaryArray =
+            BinaryArray::from_iter_values(child_values.iter().map(|v| v.as_slice()));
+        let field = Arc::new(Field::new("item", DataType::Binary, true));
+        let list = GenericListArray::<i32>::new(
+            field,
+            OffsetBuffer::new(list_offsets.into()),
+            Arc::new(child) as ArrayRef,
+            None,
+        );
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            list.data_type().clone(),
+            true,
+        )]));
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_statistics_enabled(EnabledStatistics::Page)
+            .set_data_page_row_count_limit(rows_per_page)
+            .set_write_batch_size(rows_per_page)
+            .set_max_row_group_row_count(Some(rows_per_page * 8))
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(Cursor::new(Vec::new()), Arc::clone(&schema), Some(props))
+                .unwrap();
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(list) as ArrayRef]).unwrap();
+        writer.write(&batch).unwrap();
+        Bytes::from(writer.into_inner().unwrap().into_inner())
+    }
+
+    /// The bytes global child index `i` holds in [`parquet_fixture_with_binary_list_page_rows`]:
+    /// a variable-width value (length cycles 1..3) whose contents encode `i`, so a wrong offset pair
+    /// or a swapped value changes at least one byte. Shared so fixture and assertions cannot drift.
+    pub(super) fn binary_list_child_bytes(child: usize) -> Vec<u8> {
+        let len = 1 + child % 3;
+        (0..len).map(|k| (child + k) as u8).collect()
     }
 
     fn parquet_fixture_with_all_null_page(rows_per_page: usize) -> Bytes {
@@ -2390,6 +2455,146 @@ mod tests {
         }
     }
 
+    /// A `List<Binary>` exports the child `BinaryArray`'s own i32 offsets through
+    /// `BorrowedBuffers::offsets_addr`: child element `c`'s bytes are `data[child_off[c]..child_off[c+1]]`,
+    /// nested one level under the list offsets. Widths differ per element, so an off-by-one in either
+    /// offsets array changes at least one value.
+    #[test]
+    fn a_binary_list_exports_child_offsets_that_carve_each_element_back() {
+        use arrow::array::GenericListArray;
+        use arrow::buffer::OffsetBuffer;
+        use arrow::datatypes::Field;
+
+        // rows: ["ab", "cde"], [], ["f"] -> list offsets [0, 2, 2, 3], child ["ab","cde","f"].
+        let child = BinaryArray::from_iter_values([b"ab".as_ref(), b"cde".as_ref(), b"f".as_ref()]);
+        let field = Arc::new(Field::new("item", DataType::Binary, true));
+        let list = GenericListArray::<i32>::new(
+            field,
+            OffsetBuffer::new(vec![0i32, 2, 2, 3].into()),
+            Arc::new(child) as ArrayRef,
+            None,
+        );
+
+        let borrow =
+            borrowable_list_buffers(&list).expect("a List<Binary> with an i32 child must be borrowable");
+        assert_eq!(
+            borrow.values.kind,
+            BorrowKind::Binary as i64,
+            "the child is Binary, so it borrows as the Binary wire kind"
+        );
+        assert_eq!(borrow.value_count, 3, "three child elements");
+        assert_ne!(
+            borrow.values.offsets_addr, 0,
+            "a binary child must export its own offsets buffer"
+        );
+
+        let list_off = |i: usize| unsafe { *(borrow.offsets_addr as *const i32).add(i) };
+        assert_eq!([list_off(0), list_off(1), list_off(2), list_off(3)], [0, 2, 2, 3]);
+
+        // Child binary offsets carry value_count + 1 entries: [0, 2, 5, 6] for "ab","cde","f".
+        let child_off = |i: usize| unsafe { *(borrow.values.offsets_addr as *const i32).add(i) };
+        assert_eq!([child_off(0), child_off(1), child_off(2), child_off(3)], [0, 2, 5, 6]);
+
+        // Reconstruct row 0's two elements the way Java does: list offsets pick child elements
+        // 0..2, then each child offset pair carves the byte span out of the data buffer.
+        let read_bytes = |c: usize| -> Vec<u8> {
+            let start = child_off(c) as usize;
+            let end = child_off(c + 1) as usize;
+            (start..end)
+                .map(|b| unsafe { *(borrow.values.values_addr as *const u8).add(b) })
+                .collect()
+        };
+        assert_eq!(read_bytes(0), b"ab");
+        assert_eq!(read_bytes(1), b"cde");
+        assert_eq!(read_bytes(2), b"f");
+        // Row 1 is empty: its list-offset range is [2, 2), zero elements.
+        assert_eq!(list_off(2) - list_off(1), 0, "row 1 is an empty list");
+    }
+
+    /// A list-level slice of a `List<Binary>` keeps the list offsets absolute into the whole child, and
+    /// the child binary offsets stay absolute into the whole data buffer, so a windowed row still
+    /// reconstructs its exact bytes.
+    #[test]
+    fn a_sliced_binary_list_reconstructs_from_absolute_child_offsets() {
+        use arrow::array::GenericListArray;
+        use arrow::buffer::OffsetBuffer;
+        use arrow::datatypes::Field;
+
+        // rows: ["ab","cd"], ["ef"], ["gh","ij"] -> child ["ab","cd","ef","gh","ij"].
+        let child = BinaryArray::from_iter_values([
+            b"ab".as_ref(),
+            b"cd".as_ref(),
+            b"ef".as_ref(),
+            b"gh".as_ref(),
+            b"ij".as_ref(),
+        ]);
+        let field = Arc::new(Field::new("item", DataType::Binary, true));
+        let full = GenericListArray::<i32>::new(
+            field,
+            OffsetBuffer::new(vec![0i32, 2, 3, 5].into()),
+            Arc::new(child) as ArrayRef,
+            None,
+        );
+        // Drop row 0; survivors are ["ef"] and ["gh","ij"].
+        let sliced = full.slice(1, 2);
+
+        let borrow = borrowable_list_buffers(&sliced)
+            .expect("a sliced List<Binary> must be borrowable");
+        assert_eq!(
+            borrow.value_count, 5,
+            "value_count follows the unsliced child, not the sliced row window"
+        );
+        let list_off = |i: usize| unsafe { *(borrow.offsets_addr as *const i32).add(i) };
+        // Row 1's list offset stays absolute (child element 2), not rebased to 0.
+        assert_eq!(list_off(0), 2, "sliced list offsets remain absolute into the whole child");
+        assert_eq!(list_off(1), 3);
+        assert_eq!(list_off(2), 5);
+
+        let child_off = |i: usize| unsafe { *(borrow.values.offsets_addr as *const i32).add(i) };
+        let read_bytes = |c: usize| -> Vec<u8> {
+            let start = child_off(c) as usize;
+            let end = child_off(c + 1) as usize;
+            (start..end)
+                .map(|b| unsafe { *(borrow.values.values_addr as *const u8).add(b) })
+                .collect()
+        };
+        // Surviving row 0 (originally row 1) is ["ef"] = child element 2.
+        assert_eq!(read_bytes(2), b"ef");
+        // Surviving row 1 (originally row 2) is ["gh","ij"] = child elements 3,4.
+        assert_eq!(read_bytes(3), b"gh");
+        assert_eq!(read_bytes(4), b"ij");
+    }
+
+    /// A `List<Binary>` with a null element and an empty list: the child validity marks the null slot,
+    /// and a null-list / empty-list row is a zero-width list-offset range, exactly as the numeric path.
+    #[test]
+    fn a_binary_list_with_a_null_element_marks_child_validity() {
+        use arrow::array::GenericListArray;
+        use arrow::buffer::OffsetBuffer;
+        use arrow::datatypes::Field;
+
+        // Child ["x", null, "yz"]; one row holding all three.
+        let child = BinaryArray::from_iter([Some(b"x".as_ref()), None, Some(b"yz".as_ref())]);
+        assert_eq!(child.null_count(), 1, "the middle child element is null");
+        let field = Arc::new(Field::new("item", DataType::Binary, true));
+        let list = GenericListArray::<i32>::new(
+            field,
+            OffsetBuffer::new(vec![0i32, 3].into()),
+            Arc::new(child) as ArrayRef,
+            None,
+        );
+
+        let borrow = borrowable_list_buffers(&list).expect("a List<Binary> must be borrowable");
+        assert_eq!(borrow.value_count, 3);
+        assert_ne!(
+            borrow.values.validity_addr, 0,
+            "a null child element must export a validity bitmap"
+        );
+        // Bit 1 clear (null), bits 0 and 2 set.
+        let bitmap = unsafe { *(borrow.values.validity_addr as *const u8) };
+        assert_eq!(bitmap & 0b111, 0b101, "child validity: present, null, present");
+    }
+
     /// A `LargeListArray` (i64 offsets) is not the i32-offset `ListArray` the export downcasts to, so
     /// the helper returns `None` rather than misreading 64-bit offsets as 32-bit.
     #[test]
@@ -2466,9 +2671,9 @@ mod ffm_tests {
     use tokio::runtime::Builder;
 
     use super::tests::{
-        list_fixture_row_width, parquet_fixture_with_list_page_rows,
-        parquet_fixture_with_page_rows, register_test_metadata_cache,
-        register_test_runtime_manager,
+        binary_list_child_bytes, list_fixture_row_width, parquet_fixture_with_binary_list_page_rows,
+        parquet_fixture_with_list_page_rows, parquet_fixture_with_page_rows,
+        register_test_metadata_cache, register_test_runtime_manager,
     };
     use super::*;
 
@@ -2600,8 +2805,16 @@ mod ffm_tests {
         file
     }
 
-    /// The list entry point's nine out-params, keeping the two list-only ones (`offsets_addr`,
-    /// `value_count`) the scalar `Batch` has no slot for.
+    fn binary_list_fixture_file() -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&parquet_fixture_with_binary_list_page_rows(1, ROWS_PER_PAGE))
+            .unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    /// The list entry point's out-params, keeping the list-only ones (`offsets_addr`, `value_count`,
+    /// `child_offsets_addr`) the scalar `Batch` has no slot for.
     struct ListBatch {
         rc: i64,
         first_row: i64,
@@ -2610,6 +2823,7 @@ mod ffm_tests {
         value_kind: i64,
         offsets_addr: i64,
         value_count: i64,
+        child_offsets_addr: i64,
     }
 
     fn next_list_batch(handle: i64, target_row: i64) -> ListBatch {
@@ -2620,10 +2834,11 @@ mod ffm_tests {
         let mut validity_bit_offset = -1i64;
         let mut value_kind = -1i64;
         let mut value_bit_offset = -1i64;
-        // Sentinels for the two list-only slots: a dropped `write_out` leaves these untouched, so a
+        // Sentinels for the list-only slots: a dropped `write_out` leaves these untouched, so a
         // test asserting they changed catches a missing export rather than reading a stale address.
         let mut offsets_addr = 0i64;
         let mut value_count = -1i64;
+        let mut child_offsets_addr = -1i64;
         let rc = unsafe {
             parquet_df_next_list_batch(
                 handle,
@@ -2637,6 +2852,7 @@ mod ffm_tests {
                 &mut value_bit_offset,
                 &mut offsets_addr,
                 &mut value_count,
+                &mut child_offsets_addr,
             )
         };
         ListBatch {
@@ -2647,6 +2863,7 @@ mod ffm_tests {
             value_kind,
             offsets_addr,
             value_count,
+            child_offsets_addr,
         }
     }
 
@@ -3109,6 +3326,66 @@ mod ffm_tests {
             (0..batch.value_count as i32).collect::<Vec<_>>(),
             "child value i must read back as i"
         );
+
+        assert_eq!(unsafe { parquet_df_close_iter(handle) }, RC_OK);
+    }
+
+    /// A `List<Binary>` served through the FFI exports the list offsets, the child binary offsets and
+    /// the child data buffer, so every element reconstructs to the fixture's bytes. This is the whole
+    /// point of Worker B's Rust change; the numeric carve test above covers the fixed-width child.
+    #[test]
+    fn a_served_binary_list_batch_exports_child_offsets_and_bytes() {
+        let file = binary_list_fixture_file();
+        let handle = open_fixture(&file);
+
+        let batch = next_list_batch(handle, 0);
+        assert_eq!(batch.rc, RC_OK, "{}", error_message(batch.rc));
+        assert_eq!(batch.first_row, 0);
+        assert_eq!(batch.last_row, 7, "the initial window is eight rows");
+        assert_eq!(
+            batch.value_kind,
+            BorrowKind::Binary as i64,
+            "the list child is Binary, so it borrows as the Binary wire kind"
+        );
+        assert!(holds_borrow(handle), "the served list batch must be retained");
+        assert_ne!(batch.offsets_addr, 0, "the list offsets buffer must be exported");
+        assert_ne!(batch.value_count, -1, "the child value count must be exported");
+        assert_ne!(
+            batch.child_offsets_addr, -1,
+            "a binary child must export its own offsets buffer"
+        );
+        assert_ne!(batch.child_offsets_addr, 0, "the child offsets address must be non-null");
+
+        let n = (batch.last_row - batch.first_row + 1) as usize;
+        let list_offsets = unsafe { exported_i32s(batch.offsets_addr, n + 1) };
+        assert_eq!(list_offsets[0], 0, "an unsliced first window starts at child index 0");
+        for i in 0..n {
+            let width = (list_offsets[i + 1] - list_offsets[i]) as usize;
+            assert_eq!(
+                width,
+                list_fixture_row_width(batch.first_row as usize + i),
+                "row {} element count must match the fixture",
+                batch.first_row as usize + i
+            );
+        }
+        let children = batch.value_count as usize;
+        assert_eq!(list_offsets[n] as usize, children, "final list offset equals the child count");
+
+        // Child binary offsets carry children + 1 entries; each element's byte span must match the
+        // fixture's bytes for that global child index.
+        let child_offsets = unsafe { exported_i32s(batch.child_offsets_addr, children + 1) };
+        assert_eq!(child_offsets[0], 0, "an unsliced child starts at byte 0");
+        let total_bytes = child_offsets[children] as usize;
+        let data = unsafe { std::slice::from_raw_parts(batch.values_addr as *const u8, total_bytes) };
+        for c in 0..children {
+            let start = child_offsets[c] as usize;
+            let end = child_offsets[c + 1] as usize;
+            assert_eq!(
+                &data[start..end],
+                binary_list_child_bytes(c).as_slice(),
+                "child element {c} bytes must match the fixture"
+            );
+        }
 
         assert_eq!(unsafe { parquet_df_close_iter(handle) }, RC_OK);
     }
