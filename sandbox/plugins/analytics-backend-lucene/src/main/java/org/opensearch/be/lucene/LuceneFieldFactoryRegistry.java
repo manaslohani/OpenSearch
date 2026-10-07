@@ -46,7 +46,10 @@ public final class LuceneFieldFactoryRegistry {
         ID_FIELD_TYPE.setTokenized(false);
         ID_FIELD_TYPE.setIndexOptions(IndexOptions.DOCS);
         ID_FIELD_TYPE.setOmitNorms(true);
-        ID_FIELD_TYPE.setStored(false);
+        // The stored copy is what FieldsVisitor#id() / SearchHit#getId() read in the fetch phase.
+        // Without it composite hits carry a null _id (breaks _rank_eval and stored_fields:["_id"]).
+        // Mirrors IdFieldMapper.Defaults.FIELD_TYPE on the classic engine.
+        ID_FIELD_TYPE.setStored(true);
         ID_FIELD_TYPE.setDocValuesType(DocValuesType.NONE);
         ID_FIELD_TYPE.freeze();
     }

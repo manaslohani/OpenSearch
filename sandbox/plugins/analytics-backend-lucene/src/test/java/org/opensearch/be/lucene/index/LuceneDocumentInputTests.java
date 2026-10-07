@@ -9,16 +9,24 @@
 package org.opensearch.be.lucene.index;
 
 import org.apache.lucene.document.Document;
+import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexOptions;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.IndexableFieldType;
+import org.apache.lucene.index.Terms;
+import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.store.ByteBuffersDirectory;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.util.BytesRef;
 import org.opensearch.be.lucene.LucenePlugin;
 import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.SeqNoFieldMapper;
+import org.opensearch.index.mapper.Uid;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
@@ -38,15 +46,48 @@ public class LuceneDocumentInputTests extends LucenePluginBaseTests {
     public void testIdFieldProperties() {
         MappedFieldType idField = mockIdField();
         LuceneDocumentInput input = new LuceneDocumentInput();
-        input.addField(idField, "test-id".getBytes(StandardCharsets.UTF_8));
+        input.addField(idField, encodeIdBytes("test-id"));
 
         Document doc = input.getFinalInput();
         IndexableField field = doc.getField(IdFieldMapper.NAME);
         assertNotNull("_id field should be present in document", field);
 
         IndexableFieldType ft = field.fieldType();
-        assertFalse("_id: should not be stored", ft.stored());
+        assertTrue("_id: should be stored", ft.stored());
         assertNotEquals("_id: should be indexed", IndexOptions.NONE, ft.indexOptions());
+
+        // The stored copy is what the fetch phase decodes via Uid.decodeId; verify it round-trips.
+        BytesRef binary = field.binaryValue();
+        assertNotNull("_id: should carry a binary value", binary);
+        assertEquals(
+            "_id: stored value should round-trip via Uid.decodeId",
+            "test-id",
+            Uid.decodeId(binary.bytes, binary.offset, binary.length)
+        );
+    }
+
+    public void testIdFieldStoredValueReadableFromIndex() throws Exception {
+        LuceneDocumentInput input = new LuceneDocumentInput();
+        input.addField(mockIdField(), encodeIdBytes("doc-1"));
+        Document doc = input.getFinalInput();
+
+        try (Directory dir = new ByteBuffersDirectory()) {
+            try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig())) {
+                writer.addDocument(doc);
+            }
+            try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                // Fetch phase: SearchHit#getId() reads the stored _id and decodes it via Uid.decodeId.
+                BytesRef stored = reader.storedFields().document(0).getBinaryValue(IdFieldMapper.NAME);
+                assertNotNull("_id stored value should be retrievable from the index", stored);
+                assertEquals("doc-1", Uid.decodeId(stored.bytes, stored.offset, stored.length));
+
+                // The indexed term must still be present for term lookups (get / _id queries).
+                Terms terms = reader.leaves().get(0).reader().terms(IdFieldMapper.NAME);
+                assertNotNull("_id should still be indexed as a term", terms);
+                TermsEnum termsEnum = terms.iterator();
+                assertTrue("_id term should be seekable", termsEnum.seekExact(Uid.encodeId("doc-1")));
+            }
+        }
     }
 
     public void testTextFieldProperties() {
@@ -132,6 +173,14 @@ public class LuceneDocumentInputTests extends LucenePluginBaseTests {
         assertNotNull("_primary_term field should be present in document", field);
         // Must be NUMERIC, not SORTED_NUMERIC: SeqNoPrimaryTermPhase uses getNumericDocValues.
         assertEquals(DocValuesType.NUMERIC, field.fieldType().docValuesType());
+    }
+
+    /** Mirrors {@link org.opensearch.index.mapper.IdFieldMapper#preParse}: a byte[] copy of {@link Uid#encodeId}. */
+    private static byte[] encodeIdBytes(String id) {
+        BytesRef encoded = Uid.encodeId(id);
+        byte[] idToStore = new byte[encoded.length];
+        System.arraycopy(encoded.bytes, encoded.offset, idToStore, 0, encoded.length);
+        return idToStore;
     }
 
     private static MappedFieldType mockIdField() {
