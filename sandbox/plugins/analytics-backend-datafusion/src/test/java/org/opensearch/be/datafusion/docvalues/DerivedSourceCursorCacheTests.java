@@ -17,6 +17,7 @@ import org.opensearch.test.OpenSearchTestCase;
 
 import java.io.Closeable;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Unit tests for {@link DerivedSourceCursorCache}'s reuse, eviction, threading, and close semantics,
@@ -101,38 +102,152 @@ public class DerivedSourceCursorCacheTests extends OpenSearchTestCase {
         cache.close();
     }
 
-    /** A call from a non-owning thread bypasses the cache: a fresh cursor, uncached, and others untouched. */
-    public void testOtherThreadBypassesCacheAndTouchesNothing() throws Exception {
+    /**
+     * Each thread caches its own cursor for the same column, reuses it across hits, and a segment switch on
+     * one thread evicts only that thread's cursor - never the other thread's live one.
+     */
+    public void testEachThreadGetsItsOwnCursorAndEvictsOnlyItsOwn() throws Exception {
         DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
-        CountingCursor owned = new CountingCursor();
+        CountingCursor cursorB = new CountingCursor();
+        AtomicInteger opensB = new AtomicInteger();
 
-        // Bind the cache to this thread and cache one column.
-        cache.sortedNumeric(SEGMENT_A, "n", () -> new OpenedNumeric(singleValued(1L), owned));
-        assertEquals(1, cache.liveCursorCount());
-
-        AtomicInteger bypassOpens = new AtomicInteger();
-        CountingCursor bypassCursor = new CountingCursor();
-        Thread other = new Thread(() -> {
-            try {
+        // Thread B caches its own column first and leaves it live.
+        runOnThread(() -> {
+            for (int hit = 0; hit < 2; hit++) {
+                final int target = hit;
                 SortedNumericDocValues dv = cache.sortedNumeric(SEGMENT_A, "n", () -> {
-                    bypassOpens.incrementAndGet();
-                    return new OpenedNumeric(singleValued(99L), bypassCursor);
+                    opensB.incrementAndGet();
+                    return new OpenedNumeric(singleValued(2L), cursorB);
                 });
-                assertTrue(dv.advanceExact(0));
-                assertEquals(99L, dv.nextValue());
-            } catch (Exception e) {
-                throw new AssertionError(e);
+                assertTrue(dv.advanceExact(target));
+                assertEquals("thread B reads its own value", 2L, dv.nextValue());
+            }
+            assertEquals("thread B opened its column once across both hits", 1, opensB.get());
+            assertEquals("thread B sees exactly its own one live cursor", 1, cache.liveCursorCount());
+        });
+
+        CountingCursor cursorA1 = new CountingCursor();
+        CountingCursor cursorA2 = new CountingCursor();
+        AtomicInteger opensA = new AtomicInteger();
+
+        // Thread A caches the same column name independently, then switches segment and evicts ONLY its own.
+        runOnThread(() -> {
+            for (int hit = 0; hit < 2; hit++) {
+                final int target = hit;
+                SortedNumericDocValues dv = cache.sortedNumeric(SEGMENT_A, "n", () -> {
+                    opensA.incrementAndGet();
+                    return new OpenedNumeric(singleValued(1L), cursorA1);
+                });
+                assertTrue(dv.advanceExact(target));
+                assertEquals("thread A reads its own value", 1L, dv.nextValue());
+            }
+            assertEquals("thread A opened its own column once, not shared with B", 1, opensA.get());
+            assertEquals("thread A sees exactly its own one live cursor", 1, cache.liveCursorCount());
+
+            SortedNumericDocValues fromB = cache.sortedNumeric(SEGMENT_B, "n", () -> new OpenedNumeric(singleValued(3L), cursorA2));
+            assertEquals("thread A's segment switch closed thread A's own cursor", 1, cursorA1.closes);
+            assertEquals("thread A still holds one live cursor after the switch", 1, cache.liveCursorCount());
+            assertTrue(fromB.advanceExact(0));
+            assertEquals(3L, fromB.nextValue());
+        });
+
+        assertEquals("thread A's eviction never touched thread B's cursor", 0, cursorB.closes);
+
+        cache.close();
+        assertEquals("close frees thread A's live cursor", 1, cursorA2.closes);
+        assertEquals("close frees thread B's live cursor", 1, cursorB.closes);
+        assertEquals("A's already-evicted cursor is not closed twice", 1, cursorA1.closes);
+    }
+
+    /**
+     * Scroll-like handoff: page 1 on thread A then page 2 on thread B over the same fields. Each thread
+     * opens one cursor per column and reuses it across all of its hits, so opens are bounded by columns,
+     * not by hits.
+     */
+    public void testScrollLikeHandoffAcrossThreadsReusesPerThreadCursorPerColumn() throws Exception {
+        DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
+        AtomicInteger opens = new AtomicInteger();
+
+        // Page 1 on thread A: two columns over three hits -> two cursors, each reused across the hits.
+        runOnThread(() -> fetchPage(cache, opens, 3));
+        assertEquals("page 1 opens one cursor per column (2), not per (hit, field)", 2, opens.get());
+
+        // Page 2 on a different thread B, same fields: B reuses ITS OWN one cursor per column, so it opens
+        // two more (confined entries are not shared across threads) - still not one per hit.
+        runOnThread(() -> fetchPage(cache, opens, 4));
+        assertEquals("page 2 on a new thread opens one more cursor per column (2), still not per hit", 4, opens.get());
+
+        cache.close();
+    }
+
+    /** Request close frees every thread's cached cursors after multi-thread use, and a second close is a no-op. */
+    public void testCloseAfterMultiThreadUseFreesEveryThreadsCursorsAndIsIdempotent() throws Exception {
+        DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
+        CountingCursor numericA = new CountingCursor();
+        CountingCursor keywordA = new CountingCursor();
+        CountingCursor numericB = new CountingCursor();
+
+        runOnThread(() -> {
+            cache.sortedNumeric(SEGMENT_A, "n", () -> new OpenedNumeric(singleValued(1L), numericA));
+            cache.keyword(SEGMENT_A, "k", () -> new OpenedKeyword(constantSorted(new BytesRef("x")), keywordA));
+            assertEquals("thread A holds its two cursors", 2, cache.liveCursorCount());
+        });
+        runOnThread(() -> {
+            cache.sortedNumeric(SEGMENT_A, "n", () -> new OpenedNumeric(singleValued(2L), numericB));
+            assertEquals("thread B holds its one cursor", 1, cache.liveCursorCount());
+        });
+
+        cache.close();
+        assertEquals("thread A's numeric cursor closed at request end", 1, numericA.closes);
+        assertEquals("thread A's keyword cursor closed at request end", 1, keywordA.closes);
+        assertEquals("thread B's numeric cursor closed at request end", 1, numericB.closes);
+
+        cache.close(); // second close must not throw; the cursors are already drained
+        assertEquals("no double close of a drained cursor", 1, numericA.closes);
+        assertEquals("no double close of a drained cursor", 1, keywordA.closes);
+        assertEquals("no double close of a drained cursor", 1, numericB.closes);
+    }
+
+    /** Fetches {@code hits} hits over two numeric columns on the calling thread, counting cursor opens. */
+    private static void fetchPage(DerivedSourceCursorCache cache, AtomicInteger opens, int hits) throws Exception {
+        for (int hit = 0; hit < hits; hit++) {
+            for (String field : new String[] { "a", "b" }) {
+                final int target = hit;
+                SortedNumericDocValues dv = cache.sortedNumeric(SEGMENT_A, field, () -> {
+                    opens.incrementAndGet();
+                    return new OpenedNumeric(singleValued(7L), new CountingCursor());
+                });
+                assertTrue(dv.advanceExact(target));
+                assertEquals(7L, dv.nextValue());
+            }
+        }
+        assertEquals("the fetching thread holds one live cursor per column", 2, cache.liveCursorCount());
+    }
+
+    /** A single-abstract-method runnable whose body may throw, so cache calls can run off the test thread. */
+    @FunctionalInterface
+    private interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
+    /** Runs {@code body} on a fresh thread and rethrows anything it threw, so each logical thread is distinct. */
+    private static void runOnThread(ThrowingRunnable body) throws Exception {
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread thread = new Thread(() -> {
+            try {
+                body.run();
+            } catch (Throwable t) {
+                failure.set(t);
             }
         });
-        other.start();
-        other.join();
-
-        assertEquals("the other thread opened its own fresh cursor", 1, bypassOpens.get());
-        assertEquals("the bypass path does not cache", 1, cache.liveCursorCount());
-        assertEquals("the bypass path does not close the owner thread's cursor", 0, owned.closes);
-        assertEquals("the bypass path leaves its own cursor to the registry/Cleaner, not the cache", 0, bypassCursor.closes);
-        cache.close();
-        assertEquals("request close closes the owner thread's cached cursor", 1, owned.closes);
+        thread.start();
+        thread.join();
+        Throwable thrown = failure.get();
+        if (thrown instanceof Exception exception) {
+            throw exception;
+        } else if (thrown != null) {
+            throw new AssertionError(thrown);
+        }
     }
 
     /** Request close frees every cached cursor (numeric and keyword), and a second close is a no-op. */

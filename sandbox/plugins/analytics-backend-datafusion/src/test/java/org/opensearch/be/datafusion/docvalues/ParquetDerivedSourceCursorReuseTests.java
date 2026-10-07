@@ -159,6 +159,60 @@ public class ParquetDerivedSourceCursorReuseTests extends DataFusionBackedTestCa
         }
     }
 
+    /**
+     * Two real Parquet segments served through the same cache: a column asked on segment B after segment A
+     * evicts and closes A's native cursor, so the thread keeps exactly one live cursor per column across the
+     * switch while both segments read the right values.
+     */
+    public void testCrossSegmentEvictionKeepsOneLiveCursorPerColumn() throws Exception {
+        int rowsA = 5;
+        int rowsB = 4;
+        Path parquetA = createTempDir().resolve("seg-a.parquet");
+        Path parquetB = createTempDir().resolve("seg-b.parquet");
+        LongColumnFixture.write(parquetA, allocator, NUM, rowsA, 0);
+        LongColumnFixture.write(parquetB, allocator, NUM, rowsB, 0);
+
+        try (Directory dirA = new ByteBuffersDirectory(); Directory dirB = new ByteBuffersDirectory()) {
+            writeDocs(dirA, rowsA);
+            writeDocs(dirB, rowsB);
+            try (DirectoryReader readerA = DirectoryReader.open(dirA); DirectoryReader readerB = DirectoryReader.open(dirB)) {
+                SegmentReader segA = (SegmentReader) readerA.leaves().get(0).reader();
+                SegmentReader segB = (SegmentReader) readerB.leaves().get(0).reader();
+                ParquetDocValuesProducer producerA = numericProducer(parquetA, rowsA);
+                ParquetDocValuesProducer producerB = numericProducer(parquetB, rowsB);
+                CursorRegistry registry = new CursorRegistry();
+                DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
+                // Two leaves, distinct segment keys, sharing one request-scoped cache.
+                LeafReader viewA = numericLeaf(segA, producerA, rowsA, registry, cache).perDocumentValuesReader();
+                LeafReader viewB = numericLeaf(segB, producerB, rowsB, registry, cache).perDocumentValuesReader();
+
+                assertNumericValue(viewA, 2, LongColumnFixture.valueAt(2));
+                assertEquals("segment A holds the single live cursor", 1, cache.liveCursorCount());
+
+                // Segment B asks for the same column: A's cursor is evicted and closed, B opens its own.
+                assertNumericValue(viewB, 1, LongColumnFixture.valueAt(1));
+                assertEquals("after the segment switch exactly one cursor stays live", 1, cache.liveCursorCount());
+                assertEquals(
+                    "one native cursor opened per segment (A evicted, B opened)",
+                    2,
+                    producerA.cursorsOpened() + producerB.cursorsOpened()
+                );
+
+                // Re-reading segment B keeps reusing B's one cursor; no reopen.
+                assertNumericValue(viewB, 3, LongColumnFixture.valueAt(3));
+                assertEquals("segment B keeps its one live cursor", 1, cache.liveCursorCount());
+                assertEquals(
+                    "no further native cursor opened for the reused segment",
+                    2,
+                    producerA.cursorsOpened() + producerB.cursorsOpened()
+                );
+
+                cache.close();
+                registry.close();
+            }
+        }
+    }
+
     private static void assertNumericValue(LeafReader view, int doc, long expected) throws Exception {
         SortedNumericDocValues dv = view.getSortedNumericDocValues(NUM);
         assertTrue("doc " + doc + " must have a value", dv.advanceExact(doc));
