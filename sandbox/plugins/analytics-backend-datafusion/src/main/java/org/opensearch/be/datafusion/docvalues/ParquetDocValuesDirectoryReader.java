@@ -27,27 +27,37 @@ import java.io.UncheckedIOException;
  *
  * <p>One {@link CursorRegistry} is created per wrap and shared by all leaves of that wrap. It records
  * the native cursors the request opens and is closed by {@link #doClose()} when the request ends.
+ *
+ * <p>One {@link DerivedSourceCursorCache} is likewise created per wrap and shared by all leaves. It lets
+ * {@code _source} derivation reuse a single native cursor per column across hits (and across segments)
+ * rather than opening one per (hit, field); it is closed by {@link #doClose()} before the registry.
  */
 public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader {
 
     private final ParquetSegmentResourceCache cache;
     private final CursorRegistry requestCursors;
+    private final DerivedSourceCursorCache sourceCursorCache;
 
-    private ParquetDocValuesDirectoryReader(DirectoryReader in, ParquetSegmentResourceCache cache, CursorRegistry requestCursors)
-        throws IOException {
-        super(in, new ParquetSubReaderWrapper(cache, requestCursors));
+    private ParquetDocValuesDirectoryReader(
+        DirectoryReader in,
+        ParquetSegmentResourceCache cache,
+        CursorRegistry requestCursors,
+        DerivedSourceCursorCache sourceCursorCache
+    ) throws IOException {
+        super(in, new ParquetSubReaderWrapper(cache, requestCursors, sourceCursorCache));
         this.cache = cache;
         this.requestCursors = requestCursors;
+        this.sourceCursorCache = sourceCursorCache;
     }
 
     /** Wraps {@code in} so Parquet-resident doc values are visible to query and aggregation code. */
     public static DirectoryReader wrap(DirectoryReader in, ParquetSegmentResourceCache cache) throws IOException {
-        return new ParquetDocValuesDirectoryReader(in, cache, new CursorRegistry());
+        return new ParquetDocValuesDirectoryReader(in, cache, new CursorRegistry(), new DerivedSourceCursorCache());
     }
 
     @Override
     protected DirectoryReader doWrapDirectoryReader(DirectoryReader in) throws IOException {
-        return new ParquetDocValuesDirectoryReader(in, cache, new CursorRegistry());
+        return new ParquetDocValuesDirectoryReader(in, cache, new CursorRegistry(), new DerivedSourceCursorCache());
     }
 
     @Override
@@ -59,7 +69,10 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
 
     @Override
     protected void doClose() throws IOException {
-        // Closes exactly the cursors this request opened; the shared per-core resources outlive it.
+        // Close the derived-source reuse cache first: it frees its keyword cursors and any numeric cursors
+        // it closed eagerly on segment switch. The registry then closes the request's remaining cursors;
+        // re-closing an already-closed numeric cursor is idempotent through NativeHandle.
+        sourceCursorCache.close();
         requestCursors.close();
         super.doClose();
     }
@@ -68,10 +81,16 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
     private static final class ParquetSubReaderWrapper extends SubReaderWrapper {
         private final ParquetSegmentResourceCache cache;
         private final CursorRegistry requestCursors;
+        private final DerivedSourceCursorCache sourceCursorCache;
 
-        private ParquetSubReaderWrapper(ParquetSegmentResourceCache cache, CursorRegistry requestCursors) {
+        private ParquetSubReaderWrapper(
+            ParquetSegmentResourceCache cache,
+            CursorRegistry requestCursors,
+            DerivedSourceCursorCache sourceCursorCache
+        ) {
             this.cache = cache;
             this.requestCursors = requestCursors;
+            this.sourceCursorCache = sourceCursorCache;
         }
 
         @Override
@@ -81,7 +100,7 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
                 if (resources.isAbsent()) {
                     return reader;
                 }
-                return new ParquetDocValuesLeafReader(reader, resources, requestCursors);
+                return new ParquetDocValuesLeafReader(reader, resources, requestCursors, sourceCursorCache);
             } catch (IOException e) {
                 // SubReaderWrapper.wrap cannot throw checked exceptions; surface as unchecked so the
                 // search fails loudly rather than silently dropping Parquet doc values.

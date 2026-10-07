@@ -78,6 +78,18 @@ public final class ParquetSortedDocValues extends SortedDocValues {
         }
     }
 
+    /**
+     * Closes the lazily-opened value cursor now, for request-scoped reuse ({@code DerivedSourceCursorCache})
+     * that frees cursors on eviction and at request end instead of waiting for the Cleaner. Idempotent: the
+     * underlying cursor is a {@code NativeHandle} whose close is a no-op once closed, so the registered
+     * Cleaner freeing it later is safe (no double free). A cursor never opened has nothing to close.
+     */
+    public void close() {
+        if (reader instanceof AutoCloseable closeable) {
+            closeCursorAndLogFailure(closeable);
+        }
+    }
+
     @Override
     public boolean advanceExact(int target) throws IOException {
         if (target >= maxDoc) {

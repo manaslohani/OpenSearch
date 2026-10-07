@@ -30,6 +30,7 @@ import org.opensearch.index.mapper.MapperService;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Read-only {@link DocValuesProducer} that serves single-valued numeric doc values from a Parquet
@@ -85,6 +86,9 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private final long parquetRowCount;
 
     private volatile boolean closed;
+
+    /** Count of read cursors this producer has opened; a package-private test hook for cursor-reuse assertions. */
+    private final AtomicInteger cursorsOpened = new AtomicInteger();
 
     /**
      * @param mapperService resolves OpenSearch mapping types for DV-type validation (may be
@@ -168,6 +172,18 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         return DocValues.singleton(new ParquetNumericDocValues(openCursor(field.getName(), cursors), maxDoc));
     }
 
+    /**
+     * Derived-source variant of {@link #getSortedNumeric(FieldInfo, CursorRegistry)} that also hands back
+     * the cursor backing the iterator, so the request's {@link DerivedSourceCursorCache} can close it early
+     * when it reuses one cursor per column across hits. The cursor is still registered on {@code cursors}
+     * as a request-end backstop; closing it in both places is idempotent through {@code NativeHandle}.
+     */
+    DerivedSourceCursorCache.OpenedNumeric openSortedNumericForDerivedSource(FieldInfo field, CursorRegistry cursors) throws IOException {
+        validate(field, DocValuesType.SORTED_NUMERIC);
+        ParquetColumnReader cursor = openCursor(field.getName(), cursors);
+        return new DerivedSourceCursorCache.OpenedNumeric(DocValues.singleton(new ParquetNumericDocValues(cursor, maxDoc)), cursor);
+    }
+
     @Override
     public BinaryDocValues getBinary(FieldInfo field) {
         throw unsupported("binary", field);
@@ -193,6 +209,20 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
         // The cursor opens on the first value request, so a leaf whose documents the query never
         // reaches allocates nothing.
         return DocValues.singleton(new ParquetSortedDocValues(() -> openBinaryCursor(field.getName()), maxDoc));
+    }
+
+    /**
+     * Derived-source variant of {@link #getSortedSet(FieldInfo)} that returns the streaming keyword
+     * iterator together with a closeable that frees its lazily-opened binary cursor, so the request's
+     * {@link DerivedSourceCursorCache} can close that cursor on eviction and at request end rather than
+     * leaving it to the iterator's Cleaner. Still single-valued only; multi-valued keyword is screened
+     * out by the caller, as in the aggregation path.
+     */
+    DerivedSourceCursorCache.OpenedKeyword openSortedSetForDerivedSource(FieldInfo field) throws IOException {
+        ensureOpen();
+        validate(field, DocValuesType.SORTED_SET);
+        ParquetSortedDocValues sorted = new ParquetSortedDocValues(() -> openBinaryCursor(field.getName()), maxDoc);
+        return new DerivedSourceCursorCache.OpenedKeyword(sorted, sorted::close);
     }
 
     @Override
@@ -372,6 +402,7 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
     private ParquetColumnReader openCursor(String field, CursorRegistry cursors) throws IOException {
         ParquetColumnReader reader = ParquetColumnReader.open(parquetFile, field, indexSettings, storePointer);
         cursors.register(reader);
+        cursorsOpened.incrementAndGet();
         return reader;
     }
 
@@ -381,7 +412,13 @@ public final class ParquetDocValuesProducer extends DocValuesProducer {
      * requests whose registry is already closed, so the iterator that receives this cursor closes it.
      */
     private ParquetColumnReader openBinaryCursor(String field) throws IOException {
+        cursorsOpened.incrementAndGet();
         return ParquetColumnReader.openBinary(parquetFile, field, indexSettings, storePointer);
+    }
+
+    /** Count of read cursors ({@link #openCursor}/{@link #openBinaryCursor}) opened by this producer; a test hook. */
+    int cursorsOpened() {
+        return cursorsOpened.get();
     }
 
     private UnsupportedOperationException unsupported(String kind, FieldInfo field) {

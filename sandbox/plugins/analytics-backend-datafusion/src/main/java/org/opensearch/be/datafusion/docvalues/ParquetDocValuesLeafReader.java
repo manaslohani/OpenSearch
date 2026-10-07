@@ -47,16 +47,28 @@ import java.io.IOException;
  * <p>The resources are shared across requests over the same segment core. This wrapper is request-scoped:
  * numeric cursors are recorded on the request-wide {@link CursorRegistry}, which the wrapping directory
  * reader closes when the request ends; a keyword or ip cursor is closed by the iterator that opened it.
+ *
+ * <p>Source derivation reads through the cheaper {@link #perDocumentValuesReader() per-document view},
+ * whose doc-values accessors route through the request's {@link DerivedSourceCursorCache} so one native
+ * cursor is reused per column across hits instead of one being opened per (hit, field). The aggregation
+ * and sort accessors below are unchanged and still open a dedicated cursor per call.
  */
 public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeafReader implements PerDocumentValuesProvider {
 
     private final ParquetSegmentResources resources;
     private final CursorRegistry cursors;
+    private final DerivedSourceCursorCache cursorCache;
 
-    ParquetDocValuesLeafReader(LeafReader in, ParquetSegmentResources resources, CursorRegistry cursors) {
+    ParquetDocValuesLeafReader(
+        LeafReader in,
+        ParquetSegmentResources resources,
+        CursorRegistry cursors,
+        DerivedSourceCursorCache cursorCache
+    ) {
         super(in);
         this.resources = resources;
         this.cursors = cursors;
+        this.cursorCache = cursorCache;
     }
 
     @Override
@@ -139,8 +151,15 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
                 );
             }
             assert resources.assertRowIdsAreIdentity(in) : "non-identity __row_id__ segment reached the Parquet doc-values read path";
+            if (buildOrdinals == false) {
+                // Source derivation reads one document at a time, so it reuses one native cursor per column
+                // through the request's DerivedSourceCursorCache instead of opening a fresh cursor per
+                // (hit, field); whole-segment ordinals (withSegmentOrdinals) are not wanted here. The cache
+                // returns the per-call single-valued SortedSetDocValues view directly.
+                return cursorCache.keyword(this, field, () -> resources.producer.openSortedSetForDerivedSource(fi));
+            }
             SortedDocValues plain = DocValues.unwrapSingleton(resources.producer.getSortedSet(fi));
-            return DocValues.singleton(buildOrdinals ? withSegmentOrdinals(field, plain) : plain);
+            return DocValues.singleton(withSegmentOrdinals(field, plain));
         }
         return in.getSortedSetDocValues(field);
     }
@@ -148,6 +167,11 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     @Override
     public LeafReader perDocumentValuesReader() {
         return new FilterLeafReader(this) {
+            @Override
+            public SortedNumericDocValues getSortedNumericDocValues(String field) throws IOException {
+                return derivedSourceSortedNumeric(field);
+            }
+
             @Override
             public SortedSetDocValues getSortedSetDocValues(String field) throws IOException {
                 return sortedSetDocValues(field, false);
@@ -163,6 +187,20 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
                 return ParquetDocValuesLeafReader.this.getReaderCacheHelper();
             }
         };
+    }
+
+    /**
+     * Source-derivation numeric accessor for the per-document view: reuses one native cursor per column
+     * through the request's {@link DerivedSourceCursorCache} instead of the fresh-per-call cursor the
+     * aggregation accessor {@link #getSortedNumericDocValues(String)} opens.
+     */
+    private SortedNumericDocValues derivedSourceSortedNumeric(String field) throws IOException {
+        FieldInfo fi = resources.parquetFieldInfo(field);
+        if (fi == null) {
+            return in.getSortedNumericDocValues(field);
+        }
+        assert resources.assertRowIdsAreIdentity(in) : "non-identity __row_id__ segment reached the Parquet doc-values read path";
+        return cursorCache.sortedNumeric(this, field, () -> resources.producer.openSortedNumericForDerivedSource(fi, cursors));
     }
 
     /**

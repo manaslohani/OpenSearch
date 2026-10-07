@@ -73,7 +73,12 @@ public class ParquetDocValuesLeafReaderTests extends DataFusionBackedTestCase {
         DirectoryReader reader = DirectoryReader.open(dir);
         try {
             LeafReader leaf = reader.leaves().get(0).reader();
-            ParquetDocValuesLeafReader parquetLeaf = new ParquetDocValuesLeafReader(leaf, resources, new CursorRegistry());
+            ParquetDocValuesLeafReader parquetLeaf = new ParquetDocValuesLeafReader(
+                leaf,
+                resources,
+                new CursorRegistry(),
+                new DerivedSourceCursorCache()
+            );
 
             // The null producer proves the refusal happens before any value is read: a path that touched
             // the producer would fail with NullPointerException instead of this client error.
@@ -95,7 +100,12 @@ public class ParquetDocValuesLeafReaderTests extends DataFusionBackedTestCase {
         DirectoryReader reader = DirectoryReader.open(dir);
         try {
             LeafReader leaf = reader.leaves().get(0).reader();
-            ParquetDocValuesLeafReader parquetLeaf = new ParquetDocValuesLeafReader(leaf, resources, new CursorRegistry());
+            ParquetDocValuesLeafReader parquetLeaf = new ParquetDocValuesLeafReader(
+                leaf,
+                resources,
+                new CursorRegistry(),
+                new DerivedSourceCursorCache()
+            );
 
             assertNull("SORTED accessor does not match a SORTED_SET Parquet field", parquetLeaf.getSortedDocValues("tags"));
         } finally {
@@ -114,7 +124,12 @@ public class ParquetDocValuesLeafReaderTests extends DataFusionBackedTestCase {
         DirectoryReader reader = DirectoryReader.open(dir);
         try {
             LeafReader leaf = reader.leaves().get(0).reader();
-            ParquetDocValuesLeafReader parquetLeaf = new ParquetDocValuesLeafReader(leaf, resources, new CursorRegistry());
+            ParquetDocValuesLeafReader parquetLeaf = new ParquetDocValuesLeafReader(
+                leaf,
+                resources,
+                new CursorRegistry(),
+                new DerivedSourceCursorCache()
+            );
 
             LeafReader sourceView = parquetLeaf.perDocumentValuesReader();
             SortedSetDocValues values = sourceView.getSortedSetDocValues("tags");
@@ -211,7 +226,12 @@ public class ParquetDocValuesLeafReaderTests extends DataFusionBackedTestCase {
             Set.of(),
             leaf.getSegmentInfo().info
         );
-        ParquetDocValuesLeafReader parquetLeaf = new ParquetDocValuesLeafReader(leaf, resources, new CursorRegistry());
+        ParquetDocValuesLeafReader parquetLeaf = new ParquetDocValuesLeafReader(
+            leaf,
+            resources,
+            new CursorRegistry(),
+            new DerivedSourceCursorCache()
+        );
         return DocValues.unwrapSingleton(parquetLeaf.getSortedSetDocValues(CITY));
     }
 
