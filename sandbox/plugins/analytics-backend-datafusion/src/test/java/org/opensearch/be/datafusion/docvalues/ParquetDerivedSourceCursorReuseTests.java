@@ -129,6 +129,33 @@ public class ParquetDerivedSourceCursorReuseTests extends DataFusionBackedTestCa
         }
     }
 
+    /** A backward target and a repeated target reuse the one keyword cursor and still read the right value. */
+    public void testKeywordBackwardAndRepeatTargetsReuseTheCursor() throws Exception {
+        List<String> cities = List.of("delhi", "mumbai", "pune", "surat");
+        Path parquet = createTempDir().resolve("cities-bw.parquet");
+        StringColumnFixture.write(parquet, allocator, CITY, cities);
+
+        try (Directory dir = new ByteBuffersDirectory()) {
+            writeDocs(dir, cities.size());
+            try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                SegmentReader seg = (SegmentReader) reader.leaves().get(0).reader();
+                ParquetDocValuesProducer producer = numericProducer(parquet, cities.size());
+                CursorRegistry registry = new CursorRegistry();
+                DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
+                LeafReader view = keywordLeaf(seg, producer, cities.size(), registry, cache).perDocumentValuesReader();
+
+                assertKeywordValue(view, 3, "surat");
+                assertKeywordValue(view, 1, "mumbai"); // backward: binary cursor resets (loadBatchContaining), no reopen
+                assertKeywordValue(view, 1, "mumbai"); // repeat same target
+                assertKeywordValue(view, 2, "pune");
+
+                assertEquals("backward and repeat keyword targets reuse the one cursor", 1, producer.cursorsOpened());
+                cache.close();
+                registry.close();
+            }
+        }
+    }
+
     /** The aggregation accessor on the leaf itself is unchanged: a fresh cursor per call, never cached. */
     public void testAggregationAccessorStillOpensAFreshCursorAndDoesNotCache() throws Exception {
         int rows = 4;

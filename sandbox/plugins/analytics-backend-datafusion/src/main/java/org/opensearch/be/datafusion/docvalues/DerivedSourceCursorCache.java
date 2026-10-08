@@ -109,8 +109,11 @@ final class DerivedSourceCursorCache implements Closeable {
     SortedNumericDocValues sortedNumeric(Object segmentKey, String field, CheckedSupplier<OpenedNumeric, IOException> opener)
         throws IOException {
         if (closed) {
-            // Reader already retired (no live derivation left): open fresh and uncached; closing it here
-            // could race nothing, but there is nowhere to cache it either. The CursorRegistry still frees it.
+            // Effectively unreachable: close() runs strictly after all derivation (the reader refcount in
+            // ParquetDocValuesDirectoryReader.doClose), so a deriving thread never observes closed==true. If one
+            // somehow did, open fresh and uncached - there is nowhere left to cache it. doClose closes THIS cache
+            // before the CursorRegistry, so a cursor opened on this branch is not drained by the registry; its
+            // NativeHandle Cleaner reclaims it instead.
             return opener.get().values();
         }
         ThreadState state = threadStates.computeIfAbsent(Thread.currentThread(), t -> new ThreadState());
@@ -155,7 +158,13 @@ final class DerivedSourceCursorCache implements Closeable {
 
     @Override
     public void close() {
-        // Runs at reader end, after all derivation has finished, so no thread is still touching its state.
+        // Safe ONLY because this runs strictly after all derivation has finished: ParquetDocValuesDirectoryReader
+        // .doClose() closes the cache once the wrapping reader's refcount hits 0, and the held Engine.Searcher keeps
+        // that refcount above 0 for the whole query+fetch. The ConcurrentHashMap and the volatile 'closed' publish
+        // only the Thread->ThreadState mapping; they do NOT publish the later inner-map writes
+        // (numericEntries/keywordEntries.put). Visibility of those entries to this closing thread rests on that
+        // external task-completion/refcount ordering, not on any field here. A future change that closed the cache
+        // while a thread was still deriving would be both a visibility bug and a plain-HashMap CME - do not.
         closed = true;
         for (ThreadState state : threadStates.values()) {
             for (Entry entry : state.numericEntries.values()) {
