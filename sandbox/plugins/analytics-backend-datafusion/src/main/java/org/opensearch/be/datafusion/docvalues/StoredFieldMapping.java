@@ -8,6 +8,8 @@
 
 package org.opensearch.be.datafusion.docvalues;
 
+import org.opensearch.index.mapper.IdFieldMapper;
+
 import java.util.Map;
 
 /**
@@ -23,7 +25,16 @@ final class StoredFieldMapping {
         BINARY
     }
 
-    private static final Map<String, Kind> MAPPINGS = Map.of("binary", Kind.BINARY);
+    private static final Map<String, Kind> MAPPINGS = Map.of(
+        "binary",
+        Kind.BINARY,
+        // _id is the one metadata field served through this overlay: its Parquet column holds the raw
+        // Uid.encodeId bytes that FieldsVisitor.binaryField -> Uid.decodeId expects, so it is served as a
+        // BINARY stored field exactly like a user binary field, which is what makes SearchHit#getId()
+        // non-null on a composite index.
+        IdFieldMapper.CONTENT_TYPE,
+        Kind.BINARY
+    );
 
     private StoredFieldMapping() {}
 

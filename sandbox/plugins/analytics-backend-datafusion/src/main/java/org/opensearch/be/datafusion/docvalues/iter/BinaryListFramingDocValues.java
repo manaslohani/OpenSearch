@@ -17,7 +17,6 @@ import org.opensearch.be.datafusion.docvalues.bridge.ListValueReader;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.Comparator;
 
 /**
  * {@link BinaryDocValues} over a repeated Parquet {@code BYTE_ARRAY} column, one Parquet row per

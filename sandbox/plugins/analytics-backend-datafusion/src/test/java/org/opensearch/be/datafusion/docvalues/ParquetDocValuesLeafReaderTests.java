@@ -34,6 +34,7 @@ import org.opensearch.be.datafusion.docvalues.bridge.ParquetColumnReader;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetSortedDocValues;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetUninvertedSortedDocValues;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.index.mapper.IdFieldMapper;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -116,6 +117,44 @@ public class ParquetDocValuesLeafReaderTests extends DataFusionBackedTestCase {
             LeafReader sourceView = parquetLeaf.perDocumentValuesReader();
             SortedSetDocValues values = sourceView.getSortedSetDocValues("tags");
             assertNull("source derivation omits a multi-valued field rather than throwing", values);
+        } finally {
+            reader.close();
+            writer.close();
+            dir.close();
+        }
+    }
+
+    /**
+     * A stored-only Parquet field such as {@code _id} carries dvType NONE in {@code parquetFields}; a
+     * doc-values request for it must delegate to the underlying leaf (which has none) rather than reach
+     * the producer. The null producer proves the delegation: a path that touched it would surface as a
+     * {@link NullPointerException} instead of the underlying leaf's null.
+     */
+    public void testStoredOnlyFieldDelegatesDocValuesToUnderlyingLeaf() throws Exception {
+        FieldInfo idFi = storedOnlyField(IdFieldMapper.CONTENT_TYPE);
+        ParquetSegmentResources resources = new ParquetSegmentResources(
+            null,
+            Map.of(IdFieldMapper.CONTENT_TYPE, idFi),
+            new FieldInfos(new FieldInfo[] { idFi }),
+            Set.of(),
+            null
+        );
+
+        Directory dir = newDirectory();
+        IndexWriter writer = singleDocWriter(dir);
+        DirectoryReader reader = DirectoryReader.open(dir);
+        try {
+            LeafReader leaf = reader.leaves().get(0).reader();
+            ParquetDocValuesLeafReader parquetLeaf = new ParquetDocValuesLeafReader(leaf, resources, new CursorRegistry());
+
+            assertNull("_id binary DV delegates to the underlying leaf", parquetLeaf.getBinaryDocValues(IdFieldMapper.CONTENT_TYPE));
+            assertNull("_id sorted DV delegates to the underlying leaf", parquetLeaf.getSortedDocValues(IdFieldMapper.CONTENT_TYPE));
+            assertNull("_id numeric DV delegates to the underlying leaf", parquetLeaf.getNumericDocValues(IdFieldMapper.CONTENT_TYPE));
+            assertNull(
+                "_id sorted-numeric DV delegates to the underlying leaf",
+                parquetLeaf.getSortedNumericDocValues(IdFieldMapper.CONTENT_TYPE)
+            );
+            assertNull("_id sorted-set DV delegates to the underlying leaf", parquetLeaf.getSortedSetDocValues(IdFieldMapper.CONTENT_TYPE));
         } finally {
             reader.close();
             writer.close();
@@ -243,6 +282,30 @@ public class ParquetDocValuesLeafReaderTests extends DataFusionBackedTestCase {
             false,
             IndexOptions.NONE,
             DocValuesType.SORTED_SET,
+            DocValuesSkipIndexType.NONE,
+            -1,
+            new HashMap<>(),
+            0,
+            0,
+            0,
+            0,
+            VectorEncoding.FLOAT32,
+            VectorSimilarityFunction.EUCLIDEAN,
+            false,
+            false
+        );
+    }
+
+    /** A stored-only field info: indexed (DOCS), no doc values - the shape of the real _id overlay entry. */
+    private static FieldInfo storedOnlyField(String name) {
+        return new FieldInfo(
+            name,
+            0,
+            false,
+            true,
+            false,
+            IndexOptions.DOCS,
+            DocValuesType.NONE,
             DocValuesSkipIndexType.NONE,
             -1,
             new HashMap<>(),

@@ -71,18 +71,21 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
 
     @Override
     public NumericDocValues getNumericDocValues(String field) throws IOException {
-        if (resources.parquetFieldInfo(field) != null) {
+        FieldInfo fi = resources.parquetFieldInfo(field);
+        if (fi != null && fi.getDocValuesType() != DocValuesType.NONE) {
             // Synthesized Parquet fields are SORTED_NUMERIC; like CodecReader, an accessor whose DV
             // type does not match the FieldInfo returns null rather than serving the field.
             return null;
         }
+        // A Parquet-resident field with no doc values (e.g. _id, served only as a stored field) delegates
+        // to the underlying leaf rather than reaching the producer.
         return in.getNumericDocValues(field);
     }
 
     @Override
     public SortedNumericDocValues getSortedNumericDocValues(String field) throws IOException {
         FieldInfo fi = resources.parquetFieldInfo(field);
-        if (fi != null) {
+        if (fi != null && fi.getDocValuesType() != DocValuesType.NONE) {
             if (fi.getDocValuesType() != DocValuesType.SORTED_NUMERIC) {
                 // A Parquet-resident field of another DV type (keyword, ip, binary) is served by its own
                 // accessor; a mismatched accessor returns null per the CodecReader contract.
@@ -100,7 +103,7 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
     @Override
     public BinaryDocValues getBinaryDocValues(String field) throws IOException {
         FieldInfo fi = resources.parquetFieldInfo(field);
-        if (fi != null) {
+        if (fi != null && fi.getDocValuesType() != DocValuesType.NONE) {
             if (fi.getDocValuesType() != DocValuesType.BINARY) {
                 return null;
             }
@@ -109,23 +112,27 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
             assert resources.assertRowIdsAreIdentity(in) : "non-identity __row_id__ segment reached the Parquet doc-values read path";
             return resources.producer.getBinary(fi, cursors);
         }
+        // A stored-only Parquet field (e.g. _id, dvType NONE) is never served from the producer here; it
+        // falls through to the underlying leaf, which has no binary doc values for it.
         return in.getBinaryDocValues(field);
     }
 
     @Override
     public SortedDocValues getSortedDocValues(String field) throws IOException {
-        if (resources.parquetFieldInfo(field) != null) {
+        FieldInfo fi = resources.parquetFieldInfo(field);
+        if (fi != null && fi.getDocValuesType() != DocValuesType.NONE) {
             // Keyword and ip are synthesized as SORTED_SET, so this accessor never matches; like
             // CodecReader, a non-matching accessor returns null rather than serving the field.
             return null;
         }
+        // A stored-only Parquet field (e.g. _id, dvType NONE) delegates to the underlying leaf.
         return in.getSortedDocValues(field);
     }
 
     @Override
     public DocValuesSkipper getDocValuesSkipper(String field) throws IOException {
         FieldInfo fi = resources.parquetFieldInfo(field);
-        if (fi != null) {
+        if (fi != null && fi.getDocValuesType() != DocValuesType.NONE) {
             if (fi.docValuesSkipIndexType() == DocValuesSkipIndexType.NONE) {
                 return null;
             }
@@ -146,7 +153,7 @@ public final class ParquetDocValuesLeafReader extends SequentialStoredFieldsLeaf
      */
     private SortedSetDocValues sortedSetDocValues(String field, boolean buildOrdinals) throws IOException {
         FieldInfo fi = resources.parquetFieldInfo(field);
-        if (fi != null) {
+        if (fi != null && fi.getDocValuesType() != DocValuesType.NONE) {
             if (fi.getDocValuesType() != DocValuesType.SORTED_SET) {
                 return null;
             }

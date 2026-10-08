@@ -27,11 +27,7 @@ public class ParquetBinaryListColumnReaderTests extends DataFusionBackedTestCase
     private static final String COLUMN = "blob";
 
     public void testReadsPerRowBinaryValueLists() throws Exception {
-        byte[][][] rows = {
-            { bytes("ab"), bytes("cde"), bytes("f") },
-            { bytes("gg") },
-            {},
-            { bytes(""), bytes("hij") } };
+        byte[][][] rows = { { bytes("ab"), bytes("cde"), bytes("f") }, { bytes("gg") }, {}, { bytes(""), bytes("hij") } };
         Path file = createTempDir().resolve("binary-lists.parquet");
         BinaryListColumnFixture.write(file, allocator, COLUMN, rows);
 

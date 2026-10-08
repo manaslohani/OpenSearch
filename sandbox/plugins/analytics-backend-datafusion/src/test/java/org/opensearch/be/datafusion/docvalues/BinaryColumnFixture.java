@@ -49,7 +49,22 @@ public final class BinaryColumnFixture {
     }
 
     public static void write(Path file, BufferAllocator allocator, String column, int rowCount, int nullEvery) throws Exception {
-        FieldType fieldType = nullEvery > 0 ? FieldType.nullable(new ArrowType.Binary()) : FieldType.notNullable(new ArrowType.Binary());
+        byte[][] values = new byte[rowCount][];
+        for (int i = 0; i < rowCount; i++) {
+            values[i] = (nullEvery > 0 && i % nullEvery == 0) ? null : valueAt(i);
+        }
+        writeValues(file, allocator, column, values, nullEvery > 0);
+    }
+
+    /**
+     * Writes a single-column {@code Binary} Parquet file whose present rows are {@code values}; a null
+     * entry writes a null row. {@code nullable} picks the Arrow field type, so a column with no nulls can
+     * still be written non-nullable to mirror the write path.
+     */
+    public static void writeValues(Path file, BufferAllocator allocator, String column, byte[][] values, boolean nullable)
+        throws Exception {
+        int rowCount = values.length;
+        FieldType fieldType = nullable ? FieldType.nullable(new ArrowType.Binary()) : FieldType.notNullable(new ArrowType.Binary());
         Schema schema = new Schema(List.of(new Field(column, fieldType, null)));
 
         NativeParquetWriter writer = new NativeParquetWriter(file.toString());
@@ -63,10 +78,10 @@ public final class BinaryColumnFixture {
             VarBinaryVector vector = (VarBinaryVector) root.getVector(column);
             vector.allocateNew(rowCount);
             for (int i = 0; i < rowCount; i++) {
-                if (nullEvery > 0 && i % nullEvery == 0) {
+                if (values[i] == null) {
                     vector.setNull(i);
                 } else {
-                    vector.setSafe(i, valueAt(i));
+                    vector.setSafe(i, values[i]);
                 }
             }
             vector.setValueCount(rowCount);

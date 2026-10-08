@@ -23,6 +23,7 @@ import org.apache.lucene.store.IOContext;
 import org.opensearch.common.lucene.Lucene;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
+import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
 
@@ -55,6 +56,14 @@ public final class ParquetSegmentResourceCache {
 
     /** {@code ParquetDataFormat.PARQUET_DATA_FORMAT_NAME}; that module is not on this plugin's compile classpath. */
     private static final String PARQUET_FORMAT = "parquet";
+
+    /**
+     * Metadata fields allowed through the stored-field carve-out. Exactly {@code _id} today: {@code _source},
+     * {@code _routing} and {@code _seq_no} must never be served this way even if {@link StoredFieldMapping}
+     * grows to cover their types, so the carve-out is gated on this explicit allowlist in addition to the
+     * capability and {@link StoredFieldMapping} checks.
+     */
+    private static final Set<String> PARQUET_STORED_METADATA_FIELDS = Set.of(IdFieldMapper.CONTENT_TYPE);
 
     private final MapperService mapperService;
     private final Map<IndexReader.CacheKey, ParquetSegmentResources> resourceByCore = new ConcurrentHashMap<>();
@@ -115,68 +124,19 @@ public final class ParquetSegmentResourceCache {
         }
 
         FieldInfos existing = in.getFieldInfos();
-        Map<String, FieldInfo> parquetFields = new LinkedHashMap<>();
-        Map<String, StoredFieldMapping.Kind> storedFields = new LinkedHashMap<>();
-        Set<String> multiValuedFields = new HashSet<>();
-        List<FieldInfo> combined = new ArrayList<>();
-        int maxNumber = -1;
-        for (FieldInfo fi : existing) {
-            combined.add(fi);
-            maxNumber = Math.max(maxNumber, fi.number);
-        }
-
-        // Synthesize a FieldInfo for every codec-served field whose doc values Lucene does not serve:
-        // the mapped DV type when the codec serves its doc values, NONE when it serves only the stored
-        // field. A keyword or ip field is present in the Lucene segment for its term postings, so its
-        // entry is replaced rather than added: FieldInfos rejects two entries under one name, and the
-        // synthetic one reports no postings or points.
-        for (MappedFieldType mft : mapperService.fieldTypes()) {
-            String name = mft.name();
-            if (mapperService.isMetadataField(name)) {
-                continue;
-            }
-            FieldInfo realFi = existing.fieldInfo(name);
-            if (realFi != null && realFi.getDocValuesType() != DocValuesType.NONE) {
-                continue;
-            }
-            DocValuesType dvType = FieldTypeMapping.isSupported(mft.typeName())
-                ? FieldTypeMapping.forType(mft.typeName())
-                : DocValuesType.NONE;
-            StoredFieldMapping.Kind storedKind = parquetClaimsStoredField(mft) ? StoredFieldMapping.forType(mft.typeName()) : null;
-            if (dvType == DocValuesType.NONE && storedKind == null) {
-                continue;
-            }
-            DocValuesSkipIndexType skipType = dvType == DocValuesType.NONE ? DocValuesSkipIndexType.NONE : skipIndexTypeFor(mft.typeName());
-            FieldInfo synthetic = newDocValuesFieldInfo(name, ++maxNumber, dvType, skipType);
-            if (realFi != null) {
-                combined.removeIf(fi -> fi.name.equals(name));
-            }
-            parquetFields.put(name, synthetic);
-            combined.add(synthetic);
-            if (storedKind != null) {
-                storedFields.put(name, storedKind);
-            }
-            // A mapping flips to LIST permanently the first time an array is ingested, so a field not
-            // marked LIST has never stored one. The reverse is only wasteful: a LIST field whose older
-            // segments happen to hold single values is still treated as multi-valued.
-            if (mft.isMultiValued()) {
-                multiValuedFields.add(name);
-            }
-        }
-
-        if (parquetFields.isEmpty()) {
+        SyntheticFields synthetic = buildSyntheticFields(mapperService, existing);
+        if (synthetic.parquetFields.isEmpty()) {
             return cacheAbsent(coreHelper, key);
         }
 
         ParquetDocValuesProducer producer = new ParquetDocValuesProducer(state, mapperService);
-        FieldInfos combinedFieldInfos = new FieldInfos(combined.toArray(new FieldInfo[0]));
         ParquetSegmentResources built = new ParquetSegmentResources(
             producer,
-            parquetFields,
-            combinedFieldInfos,
-            Set.copyOf(multiValuedFields),
+            synthetic.parquetFields,
+            synthetic.combinedFieldInfos,
+            synthetic.multiValuedFields,
             segmentReader.getSegmentInfo().info,
-            storedFields
+            synthetic.storedFields
         );
         resourceByCore.put(key, built);
         // Registered once, in the create branch only, so a core carries exactly one listener no matter
@@ -224,6 +184,124 @@ public final class ParquetSegmentResourceCache {
     /** Cached resource count (tests). */
     int size() {
         return resourceByCore.size();
+    }
+
+    /**
+     * Builds the synthetic {@link FieldInfo}s for the Parquet-only fields of a segment, the combined
+     * {@link FieldInfos} presented to readers, which of those fields may hold more than one value, and
+     * which are served as Parquet stored fields. Package-private and static so the per-field decision -
+     * including the metadata carve-out for {@code _id} - can be unit-tested without a Parquet-backed
+     * segment.
+     */
+    static SyntheticFields buildSyntheticFields(MapperService mapperService, FieldInfos existing) {
+        Map<String, FieldInfo> parquetFields = new LinkedHashMap<>();
+        Map<String, StoredFieldMapping.Kind> storedFields = new LinkedHashMap<>();
+        Set<String> multiValuedFields = new HashSet<>();
+        List<FieldInfo> combined = new ArrayList<>();
+        int maxNumber = -1;
+        for (FieldInfo fi : existing) {
+            combined.add(fi);
+            maxNumber = Math.max(maxNumber, fi.number);
+        }
+
+        // Synthesize a FieldInfo for every codec-served field whose doc values Lucene does not serve:
+        // the mapped DV type when the codec serves its doc values, NONE when it serves only the stored
+        // field. A keyword or ip field is present in the Lucene segment for its term postings, so its
+        // entry is replaced rather than added: FieldInfos rejects two entries under one name, and the
+        // synthetic one reports no postings or points.
+        for (MappedFieldType mft : mapperService.fieldTypes()) {
+            String name = mft.name();
+            FieldInfo realFi = existing.fieldInfo(name);
+            if (mapperService.isMetadataField(name)) {
+                // Metadata fields never get synthetic doc values, so sort and agg on _source, _seq_no,
+                // _routing, _id, ... keep whatever behaviour the Lucene secondary already gives them. The
+                // one metadata field that passes is _id: it is on the explicit PARQUET_STORED_METADATA_FIELDS
+                // allowlist, Parquet is the composite primary so it wins STORED_FIELDS for _id in
+                // assignCapabilities (parquetClaimsStoredField is true), and StoredFieldMapping maps "_id" ->
+                // BINARY. Serving its Parquet column as a stored field is what makes SearchHit#getId()
+                // non-null on a composite index. _source, _routing and _seq_no must never be served this way
+                // even if StoredFieldMapping grows to cover their types, which is why the allowlist gates the
+                // carve-out in addition to the capability and StoredFieldMapping checks.
+                if (PARQUET_STORED_METADATA_FIELDS.contains(name) == false
+                    || parquetClaimsStoredField(mft) == false
+                    || StoredFieldMapping.forType(mft.typeName()) == null) {
+                    continue;
+                }
+                // The Lucene secondary indexes _id (real FieldInfo, IndexOptions.DOCS, no doc values). Leave
+                // that real entry in `combined` untouched so getFieldInfos() still reports _id indexed,
+                // matching the postings the FilterLeafReader delegates; we only register _id for stored-field
+                // overlay routing and never synthesize doc values for it. The overlay FieldInfo is used only
+                // by visitor.needsField/binaryField, which key on name, so the real FieldInfo serves there;
+                // fall back to a synthetic stored-only one when the Lucene segment carries no _id entry.
+                FieldInfo overlayFi = realFi != null
+                    ? realFi
+                    : newDocValuesFieldInfo(name, ++maxNumber, DocValuesType.NONE, DocValuesSkipIndexType.NONE);
+                if (realFi == null) {
+                    combined.add(overlayFi);
+                }
+                parquetFields.put(name, overlayFi);
+                storedFields.put(name, StoredFieldMapping.forType(mft.typeName()));
+                if (mft.isMultiValued()) {
+                    multiValuedFields.add(name);
+                }
+                continue;
+            }
+            if (realFi != null && realFi.getDocValuesType() != DocValuesType.NONE) {
+                continue;
+            }
+            // A non-metadata field keeps its mapped DV type; a type with no FieldTypeMapping is served only
+            // as a stored field (dvType NONE).
+            DocValuesType dvType = FieldTypeMapping.isSupported(mft.typeName())
+                ? FieldTypeMapping.forType(mft.typeName())
+                : DocValuesType.NONE;
+            StoredFieldMapping.Kind storedKind = parquetClaimsStoredField(mft) ? StoredFieldMapping.forType(mft.typeName()) : null;
+            if (dvType == DocValuesType.NONE && storedKind == null) {
+                continue;
+            }
+            DocValuesSkipIndexType skipType = dvType == DocValuesType.NONE ? DocValuesSkipIndexType.NONE : skipIndexTypeFor(mft.typeName());
+            FieldInfo synthetic = newDocValuesFieldInfo(name, ++maxNumber, dvType, skipType);
+            if (realFi != null) {
+                combined.removeIf(fi -> fi.name.equals(name));
+            }
+            parquetFields.put(name, synthetic);
+            combined.add(synthetic);
+            if (storedKind != null) {
+                storedFields.put(name, storedKind);
+            }
+            // A mapping flips to LIST permanently the first time an array is ingested, so a field not
+            // marked LIST has never stored one. The reverse is only wasteful: a LIST field whose older
+            // segments happen to hold single values is still treated as multi-valued.
+            if (mft.isMultiValued()) {
+                multiValuedFields.add(name);
+            }
+        }
+
+        return new SyntheticFields(
+            parquetFields,
+            storedFields,
+            Set.copyOf(multiValuedFields),
+            new FieldInfos(combined.toArray(new FieldInfo[0]))
+        );
+    }
+
+    /** The synthetic field metadata derived from the mapping for a Parquet-backed segment. */
+    static final class SyntheticFields {
+        final Map<String, FieldInfo> parquetFields;
+        final Map<String, StoredFieldMapping.Kind> storedFields;
+        final Set<String> multiValuedFields;
+        final FieldInfos combinedFieldInfos;
+
+        SyntheticFields(
+            Map<String, FieldInfo> parquetFields,
+            Map<String, StoredFieldMapping.Kind> storedFields,
+            Set<String> multiValuedFields,
+            FieldInfos combinedFieldInfos
+        ) {
+            this.parquetFields = parquetFields;
+            this.storedFields = storedFields;
+            this.multiValuedFields = multiValuedFields;
+            this.combinedFieldInfos = combinedFieldInfos;
+        }
     }
 
     static boolean isIntegerShaped(String mappingType) {
