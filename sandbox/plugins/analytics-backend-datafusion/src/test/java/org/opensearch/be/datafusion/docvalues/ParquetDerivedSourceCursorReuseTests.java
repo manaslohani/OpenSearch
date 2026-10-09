@@ -27,6 +27,7 @@ import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
+import org.opensearch.analytics.backend.jni.NativeHandle;
 import org.opensearch.be.datafusion.docvalues.bridge.DataFusionBackedTestCase;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetColumnReader;
 import org.opensearch.common.settings.Settings;
@@ -240,6 +241,101 @@ public class ParquetDerivedSourceCursorReuseTests extends DataFusionBackedTestCa
         }
     }
 
+    /**
+     * End-to-end through the production wiring: wrap a real {@link DirectoryReader} with
+     * {@link ParquetDocValuesDirectoryReader} (the factory the reader wrapper installs), read a keyword
+     * value through the leaf's {@link ParquetDocValuesLeafReader#perDocumentValuesReader() per-document
+     * view} so the lazy native binary cursor actually opens, then close the directory reader.
+     *
+     * <p>Pins that {@link ParquetDocValuesDirectoryReader#doClose()} closes the derived-source cache, which
+     * frees that keyword cursor: the native handle is live while the reader is open and gone once it closes.
+     * The binary cursor is not recorded on the {@link CursorRegistry}, so only the cache's close frees it -
+     * remove that close and the native handle outlives the reader. Observed through the native live-handle
+     * registry ({@link NativeHandle#liveHandleCount()}), since the binary cursor is neither registered on the
+     * request registry nor reachable from the directory-reader-owned cache the production factory builds.
+     */
+    public void testClosingDirectoryReaderFreesTheDerivedSourceKeywordCursor() throws Exception {
+        List<String> cities = List.of("delhi", "mumbai", "pune");
+        Path parquet = createTempDir().resolve("cities-e2e.parquet");
+        StringColumnFixture.write(parquet, allocator, CITY, cities);
+
+        try (Directory dir = new ByteBuffersDirectory()) {
+            writeDocs(dir, cities.size());
+            DirectoryReader in = DirectoryReader.open(dir);
+            DirectoryReader wrapped = null;
+            try {
+                SegmentReader seg = (SegmentReader) in.leaves().get(0).reader();
+                ParquetDocValuesProducer producer = numericProducer(parquet, cities.size());
+                // Install the Parquet resources for this segment core so the production wrap resolves them,
+                // then wrap the reader exactly as the index reader wrapper does in production.
+                ParquetSegmentResourceCache resourceCache = new ParquetSegmentResourceCache(null);
+                resourceCache.cacheForTesting(seg, keywordResources(seg, producer));
+                wrapped = ParquetDocValuesDirectoryReader.wrap(in, resourceCache);
+
+                ParquetDocValuesLeafReader leaf = (ParquetDocValuesLeafReader) wrapped.leaves().get(0).reader();
+                LeafReader view = leaf.perDocumentValuesReader();
+
+                int handlesBefore = NativeHandle.liveHandleCount();
+                assertKeywordValue(view, 0, "delhi"); // advanceExact opens the lazy native binary cursor
+
+                assertEquals("the derived-source view opens exactly one native keyword cursor", 1, producer.cursorsOpened());
+                assertEquals(
+                    "the keyword cursor is live while the directory reader is open",
+                    handlesBefore + 1,
+                    NativeHandle.liveHandleCount()
+                );
+
+                wrapped.close(); // request end: doClose() closes the derived-source cache, then the registry
+
+                assertEquals(
+                    "closing the directory reader closed the derived-source keyword cursor",
+                    handlesBefore,
+                    NativeHandle.liveHandleCount()
+                );
+                assertEquals("no further native cursor opened after the single derived-source read", 1, producer.cursorsOpened());
+            } finally {
+                // On an assertion failure before wrapped.close(), close the wrapper so its cursor cache and
+                // registry free the native cursor; closing it also closes the inner reader.
+                if (wrapped != null && wrapped.getRefCount() > 0) {
+                    wrapped.close();
+                } else if (in.getRefCount() > 0) {
+                    in.close();
+                }
+            }
+        }
+    }
+
+    /**
+     * The keyword aggregation accessor on the leaf itself ({@code buildOrdinals=true}) is unaffected by the
+     * reuse cache: it opens its own cursor and caches nothing in the request's {@link DerivedSourceCursorCache}.
+     */
+    public void testKeywordAggregationAccessorDoesNotUseTheDerivedSourceCache() throws Exception {
+        List<String> cities = List.of("delhi", "mumbai", "pune");
+        Path parquet = createTempDir().resolve("cities-agg.parquet");
+        StringColumnFixture.write(parquet, allocator, CITY, cities);
+
+        try (Directory dir = new ByteBuffersDirectory()) {
+            writeDocs(dir, cities.size());
+            try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                SegmentReader seg = (SegmentReader) reader.leaves().get(0).reader();
+                ParquetDocValuesProducer producer = numericProducer(parquet, cities.size());
+                CursorRegistry registry = new CursorRegistry();
+                DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
+                ParquetDocValuesLeafReader leaf = keywordLeaf(seg, producer, cities.size(), registry, cache);
+
+                // Aggregation accessor (buildOrdinals=true): no CITY postings in the Lucene segment, so the
+                // ordinals build is skipped and the streaming reader serves the value directly.
+                SortedSetDocValues agg = leaf.getSortedSetDocValues(CITY);
+                assertTrue(agg.advanceExact(0));
+                assertEquals("delhi", agg.lookupOrd(agg.nextOrd()).utf8ToString());
+
+                assertEquals("the keyword aggregation path does not use the derived-source cache", 0, cache.liveCursorCount());
+                cache.close();
+                registry.close();
+            }
+        }
+    }
+
     private static void assertNumericValue(LeafReader view, int doc, long expected) throws Exception {
         SortedNumericDocValues dv = view.getSortedNumericDocValues(NUM);
         assertTrue("doc " + doc + " must have a value", dv.advanceExact(doc));
@@ -294,6 +390,18 @@ public class ParquetDerivedSourceCursorReuseTests extends DataFusionBackedTestCa
             seg.getSegmentInfo().info
         );
         return new ParquetDocValuesLeafReader(seg, resources, registry, cache);
+    }
+
+    /** The keyword SORTED_SET resources for {@code seg}, installed on the resource cache for a production wrap. */
+    private ParquetSegmentResources keywordResources(SegmentReader seg, ParquetDocValuesProducer producer) {
+        FieldInfo fi = syntheticField(CITY, DocValuesType.SORTED_SET);
+        return new ParquetSegmentResources(
+            producer,
+            Map.of(CITY, fi),
+            new FieldInfos(new FieldInfo[] { fi }),
+            Set.of(),
+            seg.getSegmentInfo().info
+        );
     }
 
     /** One trivial document per Parquet row, so the Lucene segment's maxDoc matches the column length. */
