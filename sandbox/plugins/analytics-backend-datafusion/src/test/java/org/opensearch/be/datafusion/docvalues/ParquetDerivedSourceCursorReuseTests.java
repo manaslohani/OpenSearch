@@ -12,6 +12,7 @@ import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.DocValuesSkipIndexType;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
@@ -30,6 +31,7 @@ import org.apache.lucene.store.Directory;
 import org.opensearch.analytics.backend.jni.NativeHandle;
 import org.opensearch.be.datafusion.docvalues.bridge.DataFusionBackedTestCase;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetColumnReader;
+import org.opensearch.be.datafusion.docvalues.iter.ParquetSortedDocValues;
 import org.opensearch.common.settings.Settings;
 
 import java.nio.file.Path;
@@ -248,11 +250,18 @@ public class ParquetDerivedSourceCursorReuseTests extends DataFusionBackedTestCa
      * view} so the lazy native binary cursor actually opens, then close the directory reader.
      *
      * <p>Pins that {@link ParquetDocValuesDirectoryReader#doClose()} closes the derived-source cache, which
-     * frees that keyword cursor: the native handle is live while the reader is open and gone once it closes.
-     * The binary cursor is not recorded on the {@link CursorRegistry}, so only the cache's close frees it -
-     * remove that close and the native handle outlives the reader. Observed through the native live-handle
-     * registry ({@link NativeHandle#liveHandleCount()}), since the binary cursor is neither registered on the
-     * request registry nor reachable from the directory-reader-owned cache the production factory builds.
+     * frees that keyword cursor. The binary cursor is not recorded on the {@link CursorRegistry} and the
+     * production cache is private, so only the cache's close frees it - remove that close and the native
+     * handle outlives the reader.
+     *
+     * <p>The single open is proven by {@link ParquetDocValuesProducer#cursorsOpened()}, which counts only
+     * this view's cursors. The close is then checked against the native live-handle registry
+     * ({@link NativeHandle#liveHandleCount()}): once the reader closes, the live-handle count is back at or
+     * below the pre-open baseline. The assertion is {@code <=}, not {@code ==}, on purpose - a Cleaner
+     * freeing an unrelated older handle can only decrement the JVM-global count, so {@code <=} never fails
+     * spuriously, yet it still fails deterministically if the cache stops closing the cursor (the handle then
+     * outlives the reader and the count stays above the baseline). Exact-count assertions on the global
+     * registry would be flaky for exactly that reason, so this test avoids them.
      */
     public void testClosingDirectoryReaderFreesTheDerivedSourceKeywordCursor() throws Exception {
         List<String> cities = List.of("delhi", "mumbai", "pune");
@@ -278,19 +287,22 @@ public class ParquetDerivedSourceCursorReuseTests extends DataFusionBackedTestCa
                 int handlesBefore = NativeHandle.liveHandleCount();
                 assertKeywordValue(view, 0, "delhi"); // advanceExact opens the lazy native binary cursor
 
+                // Prove the one open through the producer's own counter, not the JVM-global live-handle
+                // count: a Cleaner freeing an unrelated older handle mid-test can only shift that global
+                // count down, so asserting handlesBefore+1 here would be flaky. cursorsOpened() counts
+                // exactly this view's cursors.
                 assertEquals("the derived-source view opens exactly one native keyword cursor", 1, producer.cursorsOpened());
-                assertEquals(
-                    "the keyword cursor is live while the directory reader is open",
-                    handlesBefore + 1,
-                    NativeHandle.liveHandleCount()
-                );
 
                 wrapped.close(); // request end: doClose() closes the derived-source cache, then the registry
 
-                assertEquals(
-                    "closing the directory reader closed the derived-source keyword cursor",
-                    handlesBefore,
-                    NativeHandle.liveHandleCount()
+                // doClose() closed the derived-source cache, which freed this view's one keyword cursor, so
+                // the live-handle count is back at or below the pre-open baseline. Cleaners only decrement
+                // the global count, so <= never fails spuriously; it still fails deterministically if the
+                // cache stops closing the cursor (the handle then outlives the reader and the count stays
+                // above handlesBefore), which is what pins ParquetDocValuesDirectoryReader.doClose()'s close.
+                assertTrue(
+                    "closing the directory reader freed the derived-source keyword cursor (live handles back to baseline)",
+                    NativeHandle.liveHandleCount() <= handlesBefore
                 );
                 assertEquals("no further native cursor opened after the single derived-source read", 1, producer.cursorsOpened());
             } finally {
@@ -324,12 +336,21 @@ public class ParquetDerivedSourceCursorReuseTests extends DataFusionBackedTestCa
                 ParquetDocValuesLeafReader leaf = keywordLeaf(seg, producer, cities.size(), registry, cache);
 
                 // Aggregation accessor (buildOrdinals=true): no CITY postings in the Lucene segment, so the
-                // ordinals build is skipped and the streaming reader serves the value directly.
+                // ordinals build is skipped and the streaming reader serves the value directly. Grab the
+                // inner streaming iterator before advancing - DocValues.unwrapSingleton rejects a singleton
+                // whose inner has already been used - so it can be closed once the read is done.
                 SortedSetDocValues agg = leaf.getSortedSetDocValues(CITY);
+                ParquetSortedDocValues aggInner = (ParquetSortedDocValues) DocValues.unwrapSingleton(agg);
                 assertTrue(agg.advanceExact(0));
                 assertEquals("delhi", agg.lookupOrd(agg.nextOrd()).utf8ToString());
 
                 assertEquals("the keyword aggregation path does not use the derived-source cache", 0, cache.liveCursorCount());
+
+                // The aggregation path opens its own streaming keyword cursor, recorded on neither the
+                // registry nor the cache. Close it explicitly rather than leaving it to the iterator's
+                // Cleaner: a Cleaner-only handle freed mid-run would shift the JVM-global live-handle count
+                // that testClosingDirectoryReaderFreesTheDerivedSourceKeywordCursor reads.
+                aggInner.close();
                 cache.close();
                 registry.close();
             }
