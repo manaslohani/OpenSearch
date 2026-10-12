@@ -32,7 +32,9 @@ import org.opensearch.analytics.backend.jni.NativeHandle;
 import org.opensearch.be.datafusion.docvalues.bridge.DataFusionBackedTestCase;
 import org.opensearch.be.datafusion.docvalues.bridge.ParquetColumnReader;
 import org.opensearch.be.datafusion.docvalues.iter.ParquetSortedDocValues;
+import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.core.index.shard.ShardId;
 
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -336,6 +338,100 @@ public class ParquetDerivedSourceCursorReuseTests extends DataFusionBackedTestCa
                 aggInner.close();
                 cache.close();
                 registry.close();
+            }
+        }
+    }
+
+    /**
+     * End-of-fetch drain through the exact entry point the {@code SearchOperationListener} calls:
+     * {@link ParquetDocValuesDirectoryReader#drainCurrentThread(DirectoryReader)}. After a page's read opens
+     * a native keyword cursor, draining the fetch thread frees that cursor (a) while the wrapped reader stays
+     * open (its refcount is untouched), and a second page on the same reader re-opens the cursor and reads the
+     * right value (c). Removing the drain call leaves the cursor live past the drain and fails this test.
+     */
+    public void testFetchPhaseDrainFreesThreadCursorsWhileReaderStaysOpenAndNextPageReopens() throws Exception {
+        List<String> cities = List.of("delhi", "mumbai", "pune");
+        Path parquet = createTempDir().resolve("cities-drain.parquet");
+        StringColumnFixture.write(parquet, allocator, CITY, cities);
+
+        try (Directory dir = new ByteBuffersDirectory()) {
+            writeDocs(dir, cities.size());
+            DirectoryReader in = DirectoryReader.open(dir);
+            DirectoryReader wrapped = null;
+            try {
+                SegmentReader seg = (SegmentReader) in.leaves().get(0).reader();
+                ParquetDocValuesProducer producer = numericProducer(parquet, cities.size());
+                ParquetSegmentResourceCache resourceCache = new ParquetSegmentResourceCache(null);
+                resourceCache.cacheForTesting(seg, keywordResources(seg, producer));
+                wrapped = ParquetDocValuesDirectoryReader.wrap(in, resourceCache);
+
+                LeafReader view = ((ParquetDocValuesLeafReader) wrapped.leaves().get(0).reader()).perDocumentValuesReader();
+
+                int handlesBefore = NativeHandle.liveHandleCount();
+                assertKeywordValue(view, 0, "delhi"); // page 1 opens the lazy native binary cursor
+                assertEquals("page 1 opens one native cursor", 1, producer.cursorsOpened());
+
+                // End of fetch phase for this thread: free its cursors without closing the reader.
+                ParquetDocValuesDirectoryReader.drainCurrentThread(wrapped);
+                assertTrue(
+                    "the drain freed the fetch thread's keyword cursor (live handles back to baseline)",
+                    NativeHandle.liveHandleCount() <= handlesBefore
+                );
+                assertTrue("the reader stays open after the drain", wrapped.getRefCount() > 0);
+
+                // Page 2 on the same still-open reader: the cursor is re-opened and reads the right value.
+                assertKeywordValue(view, 2, "pune");
+                assertEquals("page 2 re-opens the drained cursor", 2, producer.cursorsOpened());
+            } finally {
+                if (wrapped != null && wrapped.getRefCount() > 0) {
+                    wrapped.close();
+                } else if (in.getRefCount() > 0) {
+                    in.close();
+                }
+            }
+        }
+    }
+
+    /**
+     * The listener-side unwrap finds the {@link ParquetDocValuesDirectoryReader} through an outer
+     * {@link org.opensearch.common.lucene.index.OpenSearchDirectoryReader} wrapper (the search reader is
+     * never the bare Parquet reader) and drains the fetch thread's cursor.
+     */
+    public void testDrainUnwrapsThroughFilterDirectoryReaderWrappers() throws Exception {
+        List<String> cities = List.of("delhi", "mumbai");
+        Path parquet = createTempDir().resolve("cities-unwrap.parquet");
+        StringColumnFixture.write(parquet, allocator, CITY, cities);
+
+        try (Directory dir = new ByteBuffersDirectory()) {
+            writeDocs(dir, cities.size());
+            DirectoryReader in = DirectoryReader.open(dir);
+            DirectoryReader outer = null;
+            try {
+                SegmentReader seg = (SegmentReader) in.leaves().get(0).reader();
+                ParquetDocValuesProducer producer = numericProducer(parquet, cities.size());
+                ParquetSegmentResourceCache resourceCache = new ParquetSegmentResourceCache(null);
+                resourceCache.cacheForTesting(seg, keywordResources(seg, producer));
+                DirectoryReader parquetReader = ParquetDocValuesDirectoryReader.wrap(in, resourceCache);
+                // Wrap again so the Parquet reader is nested behind another FilterDirectoryReader, as in search.
+                outer = OpenSearchDirectoryReader.wrap(parquetReader, new ShardId("idx", "uuid", 0));
+
+                LeafReader view = ((ParquetDocValuesLeafReader) parquetReader.leaves().get(0).reader()).perDocumentValuesReader();
+                int handlesBefore = NativeHandle.liveHandleCount();
+                assertKeywordValue(view, 0, "delhi");
+                assertEquals(1, producer.cursorsOpened());
+
+                ParquetDocValuesDirectoryReader.drainCurrentThread(outer); // drains through the outer wrapper
+                assertTrue(
+                    "the drain reached the nested Parquet reader and freed its cursor",
+                    NativeHandle.liveHandleCount() <= handlesBefore
+                );
+                assertTrue("the reader stays open after the drain", outer.getRefCount() > 0);
+            } finally {
+                if (outer != null && outer.getRefCount() > 0) {
+                    outer.close();
+                } else if (in.getRefCount() > 0) {
+                    in.close();
+                }
             }
         }
     }

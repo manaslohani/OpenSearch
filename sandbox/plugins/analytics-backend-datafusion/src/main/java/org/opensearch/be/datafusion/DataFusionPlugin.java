@@ -22,6 +22,7 @@ import org.opensearch.be.datafusion.action.stats.TransportDataFusionStatsAction;
 import org.opensearch.be.datafusion.cache.CacheManager;
 import org.opensearch.be.datafusion.cache.CacheSettings;
 import org.opensearch.be.datafusion.cache.CacheUtils;
+import org.opensearch.be.datafusion.docvalues.DerivedSourceCursorDrainingListener;
 import org.opensearch.be.datafusion.docvalues.ParquetDocValuesDirectoryReader;
 import org.opensearch.be.datafusion.docvalues.ParquetSegmentResourceCache;
 import org.opensearch.be.datafusion.docvalues.UninvertedOrdinals;
@@ -835,6 +836,10 @@ public class DataFusionPlugin extends Plugin
         if (IndexSettings.PLUGGABLE_DATAFORMAT_ENABLED_SETTING.get(indexModule.getSettings()) == false) {
             return;
         }
+        // Free each fetch thread's reused derived-source cursors at the end of every fetch phase so a
+        // reused reader (scroll/PIT) does not pin native cursors idle between pages; the wrapping reader's
+        // doClose() stays the request-end backstop.
+        indexModule.addSearchOperationListener(new DerivedSourceCursorDrainingListener());
         indexModule.setReaderWrapper(indexService -> {
             if (indexService.getIndexSettings().isPluggableDataFormatEnabled() == false) {
                 return null;

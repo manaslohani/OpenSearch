@@ -270,6 +270,95 @@ public class DerivedSourceCursorCacheTests extends OpenSearchTestCase {
         assertEquals("no double close of a drained cursor", 1, keywordCursor.closes);
     }
 
+    /**
+     * The end-of-fetch drain closes the calling thread's cached cursors (a) and, since the cache stays open,
+     * a later hit re-opens a fresh cursor and reads the right value (c) - the still-open reader's next page.
+     */
+    public void testCloseCurrentThreadDrainsCallingThreadThenReopens() throws Exception {
+        DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
+        AtomicInteger opens = new AtomicInteger();
+        CountingCursor first = new CountingCursor();
+
+        SortedNumericDocValues page1 = cache.sortedNumeric(SEGMENT_A, "n", () -> {
+            opens.incrementAndGet();
+            return new OpenedNumeric(singleValued(42L), first);
+        });
+        assertTrue(page1.advanceExact(0));
+        assertEquals(42L, page1.nextValue());
+        assertEquals("one live cursor before the drain", 1, cache.liveCursorCount());
+
+        cache.closeCurrentThread();
+        assertEquals("the drained thread's cursor is closed", 1, first.closes);
+        assertEquals("no cached cursors remain on the drained thread", 0, cache.liveCursorCount());
+
+        // Second 'page' on the same still-open cache: a fresh cursor is opened and reads the right value.
+        CountingCursor second = new CountingCursor();
+        SortedNumericDocValues page2 = cache.sortedNumeric(SEGMENT_A, "n", () -> {
+            opens.incrementAndGet();
+            return new OpenedNumeric(singleValued(43L), second);
+        });
+        assertTrue(page2.advanceExact(0));
+        assertEquals("the next page re-opens the cursor and reads correctly", 43L, page2.nextValue());
+        assertEquals("the opener ran once per page", 2, opens.get());
+        assertEquals("one live cursor again after the reopen", 1, cache.liveCursorCount());
+
+        cache.close();
+        assertEquals("close frees the reopened cursor", 1, second.closes);
+        assertEquals("the already-drained cursor is not closed twice", 1, first.closes);
+    }
+
+    /** One thread's end-of-fetch drain closes only its own cursors; another thread's entries are untouched. */
+    public void testCloseCurrentThreadDrainsOnlyTheCallingThread() throws Exception {
+        DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
+        CountingCursor cursorB = new CountingCursor();
+
+        // Thread B caches a cursor and leaves it live (its page is still deriving / between pages).
+        runOnThread(() -> {
+            cache.sortedNumeric(SEGMENT_A, "n", () -> new OpenedNumeric(singleValued(2L), cursorB));
+            assertEquals("thread B holds its one cursor", 1, cache.liveCursorCount());
+        });
+
+        // Thread A caches, then drains at the end of its fetch phase: only A's cursor closes.
+        CountingCursor cursorA = new CountingCursor();
+        runOnThread(() -> {
+            cache.sortedNumeric(SEGMENT_A, "n", () -> new OpenedNumeric(singleValued(1L), cursorA));
+            cache.closeCurrentThread();
+            assertEquals("thread A's own cursor closed by its drain", 1, cursorA.closes);
+            assertEquals("thread A has no cached cursors after its drain", 0, cache.liveCursorCount());
+        });
+
+        assertEquals("thread A's drain never touched thread B's cursor", 0, cursorB.closes);
+
+        cache.close();
+        assertEquals("close is the backstop that frees thread B's still-live cursor", 1, cursorB.closes);
+        assertEquals("A's already-drained cursor is not closed twice", 1, cursorA.closes);
+    }
+
+    /** Draining a thread that never derived (no ThreadState) is a safe no-op. */
+    public void testCloseCurrentThreadWithoutStateIsNoOp() {
+        DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
+        cache.closeCurrentThread(); // must not throw
+        assertEquals(0, cache.liveCursorCount());
+        cache.close();
+    }
+
+    /** After a thread drains, the request-end {@link DerivedSourceCursorCache#close()} does not close it again. */
+    public void testCloseCurrentThreadThenCloseDoesNotDoubleClose() throws Exception {
+        DerivedSourceCursorCache cache = new DerivedSourceCursorCache();
+        CountingCursor numeric = new CountingCursor();
+        CountingCursor keyword = new CountingCursor();
+
+        cache.sortedNumeric(SEGMENT_A, "n", () -> new OpenedNumeric(singleValued(1L), numeric));
+        cache.keyword(SEGMENT_A, "k", () -> new OpenedKeyword(constantSorted(new BytesRef("x")), keyword));
+        cache.closeCurrentThread();
+        assertEquals(1, numeric.closes);
+        assertEquals(1, keyword.closes);
+
+        cache.close(); // backstop over an already-drained thread: no double close
+        assertEquals("drained numeric cursor not closed twice", 1, numeric.closes);
+        assertEquals("drained keyword cursor not closed twice", 1, keyword.closes);
+    }
+
     /** A single-valued SortedNumericDocValues returning {@code value} at any present doc. */
     private static SortedNumericDocValues singleValued(long value) {
         return new SortedNumericDocValues() {

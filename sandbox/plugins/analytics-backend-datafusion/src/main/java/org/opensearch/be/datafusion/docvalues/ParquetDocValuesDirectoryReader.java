@@ -67,6 +67,29 @@ public final class ParquetDocValuesDirectoryReader extends FilterDirectoryReader
         return in.getReaderCacheHelper();
     }
 
+    /**
+     * Drains the calling thread's reused derived-source cursors at the end of a fetch phase, freeing their
+     * native handles while this reader stays open for later pages (scroll/PIT). {@link #doClose()} remains
+     * the request-end backstop for any thread that did not drain.
+     */
+    public void drainCurrentThread() {
+        sourceCursorCache.closeCurrentThread();
+    }
+
+    /**
+     * Unwraps {@code reader}'s {@link FilterDirectoryReader} chain to the first
+     * {@link ParquetDocValuesDirectoryReader} and {@link #drainCurrentThread() drains} the calling thread's
+     * cursors; a no-op when the chain holds no such reader (index not using the pluggable data format).
+     */
+    public static void drainCurrentThread(DirectoryReader reader) {
+        for (DirectoryReader r = reader; r instanceof FilterDirectoryReader; r = ((FilterDirectoryReader) r).getDelegate()) {
+            if (r instanceof ParquetDocValuesDirectoryReader) {
+                ((ParquetDocValuesDirectoryReader) r).drainCurrentThread();
+                return;
+            }
+        }
+    }
+
     @Override
     protected void doClose() throws IOException {
         // Close the derived-source reuse cache first: it frees its keyword cursors and any numeric cursors

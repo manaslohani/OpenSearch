@@ -179,6 +179,29 @@ final class DerivedSourceCursorCache implements Closeable {
         threadStates.clear();
     }
 
+    /**
+     * Drains the calling thread's cached cursors at the end of a fetch phase: removes this thread's
+     * {@link ThreadState} and closes its cursors, so a reused reader (scroll/PIT, which keeps one cache
+     * across pages) does not pin native cursors idle between pages. Only the calling thread's own entries
+     * are touched - other threads' {@link ThreadState} is left intact - so this never races a live read.
+     * Safe when the thread has no state and after {@link #close()} (both leave the map empty for it).
+     * {@link #close()} stays the request-end backstop for any thread that did not drain.
+     */
+    void closeCurrentThread() {
+        ThreadState state = threadStates.remove(Thread.currentThread());
+        if (state == null) {
+            return;
+        }
+        for (Entry entry : state.numericEntries.values()) {
+            closeQuietly(entry.cursor);
+        }
+        state.numericEntries.clear();
+        for (Entry entry : state.keywordEntries.values()) {
+            closeQuietly(entry.cursor);
+        }
+        state.keywordEntries.clear();
+    }
+
     private static void closeQuietly(AutoCloseable cursor) {
         try {
             cursor.close();
